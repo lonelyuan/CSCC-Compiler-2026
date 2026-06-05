@@ -24,6 +24,14 @@ cd /root/bisheng
 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```
 
+Run benchmark suites and write CSV results:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+LABEL=after_madd_coarsening REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+```
+
 Package artifacts:
 
 ```bash
@@ -40,4 +48,3 @@ Current implementation:
   `cholesky`, `trsm`, and `madd` ABI, and schedules tile-level work with panel
   barriers.
 - No source annotations are required.
-

@@ -141,3 +141,5 @@ speedup=1.848x
 ```
 
 上述两组测试的串行 baseline 输出和 contestant app 输出均通过 verifier。
+
+更新后的详细性能记录见 `docs/performance.md`。当前优化版本在 `n1024` 公开子集上达到约 `2.171x` 平均加速，在 `n1152_small_b` 子集上达到约 `2.065x` 平均加速。

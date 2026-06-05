@@ -1,0 +1,13 @@
+label,suite,repeat,threads,serial_seconds,contestant_seconds,speedup
+after_madd_coarsening,n512_576,1,4,0.080006695,0.068125859,1.174395
+after_madd_coarsening,n512_576,2,4,0.080761366,0.068958366,1.171161
+after_madd_coarsening,n512_576,3,4,0.082267046,0.068714242,1.197234
+after_madd_coarsening,n768,1,4,0.209754127,0.113751521,1.843968
+after_madd_coarsening,n768,2,4,0.209722043,0.113995187,1.839745
+after_madd_coarsening,n768,3,4,0.215872209,0.114346274,1.887881
+after_madd_coarsening,n1024,1,4,0.284087697,0.131864900,2.154385
+after_madd_coarsening,n1024,2,4,0.284262907,0.128882877,2.205591
+after_madd_coarsening,n1024,3,4,0.283097355,0.131499439,2.152841
+after_madd_coarsening,n1152_small_b,1,4,0.350674088,0.158784887,2.208485
+after_madd_coarsening,n1152_small_b,2,4,0.334534430,0.170042673,1.967356
+after_madd_coarsening,n1152_small_b,3,4,0.334123846,0.165403890,2.020048

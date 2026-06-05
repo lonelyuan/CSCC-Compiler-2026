@@ -27,7 +27,7 @@ public:
         }
         workers_.reserve(thread_count_);
         for (std::size_t i = 0; i < thread_count_; ++i) {
-            workers_.emplace_back([this]() { workerLoop(); });
+            workers_.emplace_back([this, i]() { workerLoop(i); });
         }
     }
 
@@ -57,6 +57,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             task_ = std::move(task);
             total_ = count;
+            active_workers_ = std::min(thread_count_, count);
+            chunk_size_ = std::max<std::size_t>(
+                1, (count + active_workers_ * 8 - 1) / (active_workers_ * 8));
             next_.store(0, std::memory_order_relaxed);
             remaining_workers_.store(thread_count_, std::memory_order_relaxed);
             worker_error_ = nullptr;
@@ -76,7 +79,7 @@ public:
     }
 
 private:
-    void workerLoop() {
+    void workerLoop(std::size_t worker_id) {
         std::size_t observed_generation = 0;
         while (true) {
             {
@@ -90,20 +93,26 @@ private:
                 observed_generation = generation_;
             }
 
-            try {
-                while (true) {
-                    const std::size_t index = next_.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= total_) {
-                        break;
+            if (worker_id < active_workers_) {
+                try {
+                    while (true) {
+                        const std::size_t begin =
+                            next_.fetch_add(chunk_size_, std::memory_order_relaxed);
+                        if (begin >= total_) {
+                            break;
+                        }
+                        const std::size_t end = std::min(total_, begin + chunk_size_);
+                        for (std::size_t index = begin; index < end; ++index) {
+                            task_(index);
+                        }
                     }
-                    task_(index);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!worker_error_) {
+                        worker_error_ = std::current_exception();
+                    }
+                    next_.store(total_, std::memory_order_relaxed);
                 }
-            } catch (...) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!worker_error_) {
-                    worker_error_ = std::current_exception();
-                }
-                next_.store(total_, std::memory_order_relaxed);
             }
 
             if (remaining_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -125,6 +134,8 @@ private:
     std::atomic<std::size_t> next_{0};
     std::atomic<std::size_t> remaining_workers_{0};
     std::size_t total_ = 0;
+    std::size_t active_workers_ = 0;
+    std::size_t chunk_size_ = 1;
     std::size_t generation_ = 0;
     std::size_t finished_generation_ = 0;
     bool stopping_ = false;
@@ -148,7 +159,7 @@ std::size_t resolveThreadCount(int block_count) {
     if (block_count <= 1) {
         return 1;
     }
-    return std::max<std::size_t>(1, threads);
+    return std::max<std::size_t>(1, std::min<std::size_t>(threads, block_count));
 }
 
 inline double *blockPtr(double *matrix, int n, int b, int block_row, int block_col) {
@@ -175,10 +186,15 @@ int runBlockCholeskyDag(const double *A, double *L, int n, int b) {
         throw std::invalid_argument("Current runtime requires n to be divisible by b");
     }
 
-    std::copy(A, A + static_cast<std::size_t>(n) * n, L);
-
     const int block_count = n / b;
     WorkerTeam team(resolveThreadCount(block_count));
+
+    team.run(static_cast<std::size_t>(n), [&](std::size_t row_index) {
+        const std::size_t row = row_index * static_cast<std::size_t>(n);
+        std::copy(A + row, A + row + n, L + row);
+    });
+
+    std::vector<std::pair<int, int>> updates;
 
     for (int panel = 0; panel < block_count; ++panel) {
         cholesky(blockPtr(L, n, b, panel, panel), blockPtr(L, n, b, panel, panel), b, n);
@@ -192,21 +208,33 @@ int runBlockCholeskyDag(const double *A, double *L, int n, int b) {
                  b, n);
         });
 
-        std::vector<std::pair<int, int>> updates;
-        updates.reserve(static_cast<std::size_t>(trailing) * (trailing + 1) / 2);
-        for (int col_block = panel + 1; col_block < block_count; ++col_block) {
-            for (int row_block = col_block; row_block < block_count; ++row_block) {
-                updates.emplace_back(row_block, col_block);
+        if (b <= 32) {
+            team.run(static_cast<std::size_t>(trailing), [&](std::size_t task_index) {
+                const int col_block = panel + 1 + static_cast<int>(task_index);
+                for (int row_block = col_block; row_block < block_count; ++row_block) {
+                    madd(blockPtr(L, n, b, row_block, panel),
+                         blockPtr(L, n, b, col_block, panel),
+                         blockPtr(L, n, b, row_block, col_block),
+                         b, n);
+                }
+            });
+        } else {
+            updates.clear();
+            updates.reserve(static_cast<std::size_t>(trailing) * (trailing + 1) / 2);
+            for (int col_block = panel + 1; col_block < block_count; ++col_block) {
+                for (int row_block = col_block; row_block < block_count; ++row_block) {
+                    updates.emplace_back(row_block, col_block);
+                }
             }
-        }
 
-        team.run(updates.size(), [&](std::size_t task_index) {
-            const auto [row_block, col_block] = updates[task_index];
-            madd(blockPtr(L, n, b, row_block, panel),
-                 blockPtr(L, n, b, col_block, panel),
-                 blockPtr(L, n, b, row_block, col_block),
-                 b, n);
-        });
+            team.run(updates.size(), [&](std::size_t task_index) {
+                const auto [row_block, col_block] = updates[task_index];
+                madd(blockPtr(L, n, b, row_block, panel),
+                     blockPtr(L, n, b, col_block, panel),
+                     blockPtr(L, n, b, row_block, col_block),
+                     b, n);
+            });
+        }
     }
 
     clearUpperTriangle(L, n, team);

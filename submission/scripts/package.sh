@@ -17,10 +17,11 @@ cp "${BUILD_DIR}/runtime/libcontestant_runtime.a" "${DIST_DIR}/runtime/"
 cp "${SUBMISSION_DIR}/manifest.json" "${DIST_DIR}/manifest.json"
 cp "${SUBMISSION_DIR}/README.md" "${DIST_DIR}/README.md"
 cp "${SUBMISSION_DIR}/docs/design.md" "${DIST_DIR}/docs/design.md"
+cp "${SUBMISSION_DIR}/docs/performance.md" "${DIST_DIR}/docs/performance.md"
+cp -R "${SUBMISSION_DIR}/docs/benchmark_results" "${DIST_DIR}/docs/benchmark_results"
 
 tar -C "$(dirname "${DIST_DIR}")" -czf "${REPO_ROOT}/dist/submission.tar.gz" "$(basename "${DIST_DIR}")"
 
 echo "Packaged:"
 echo "  ${DIST_DIR}"
 echo "  ${REPO_ROOT}/dist/submission.tar.gz"
-
