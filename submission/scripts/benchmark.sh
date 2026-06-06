@@ -74,7 +74,7 @@ IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -174,6 +174,7 @@ summary_ms = {
     "queue_ms": 0.0,
     "exec_ms": 0.0,
     "worker_idle_ms": 0.0,
+    "main_wait_ms": 0.0,
 }
 tasks = {
     "trsm": {"count": 0, "queue_ms": 0.0, "exec_ms": 0.0},
@@ -253,6 +254,7 @@ writer.writerow([
     f"{summary_ms['queue_ms']:.3f}",
     f"{summary_ms['exec_ms']:.3f}",
     f"{summary_ms['worker_idle_ms']:.3f}",
+    f"{summary_ms['main_wait_ms']:.3f}",
     tasks["trsm"]["count"],
     f"{tasks['trsm']['queue_ms']:.3f}",
     f"{tasks['trsm']['exec_ms']:.3f}",
@@ -329,6 +331,7 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
             f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
             f"max_dag_successors={max(int(r['max_dag_successors']) for r in task_rows)} "
             f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
-            f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f}"
+            f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f} "
+            f"main_wait_ms_avg={statistics.mean(float(r['main_wait_ms']) for r in task_rows):.3f}"
         )
 PY

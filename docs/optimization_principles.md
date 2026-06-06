@@ -303,7 +303,7 @@ void compiler2026_runtime_end();
 - queue/DAG reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销。
-- 可选输出 task 数、队列等待、执行时间、worker idle、DAG 节点/边/释放等 profile 指标。
+- 可选输出 task 数、队列等待、执行时间、worker idle、主线程 wait 空等、DAG 节点/边/释放等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 
 benchmark 脚本会把这些 profile 行解析进 CSV。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。
@@ -468,7 +468,7 @@ writes block(row, col)
 - 线程数：`1, 2, 4, 8, 16, 32, 48, 64`。
 - 矩阵规模：`512, 768, 1024, 2048, 4096, 8192, 10000`。
 - block size：`8, 16, 24, 32, 48, 64, 96, 128, 192, 256`。
-- 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率。
+- 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率、主线程 wait 空等时间。
 
 只有当一个优化在多组规模和多种线程数下都稳定提升，才应认为它是鲁棒优化。
 

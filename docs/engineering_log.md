@@ -338,3 +338,27 @@
 - `LABEL=queue_reset_lock_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/queue_reset_lock_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.968461s contestant_total=0.647668s speedup_avg=1.515x speedup_geo=1.484x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5107.5`、`max_dag_successors=35`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 main wait profile counter
+
+改动：
+
+- runtime profile 新增 `main_wait_ms`，记录主线程在 `compiler2026_runtime_wait()` 中没有 ready task 可执行、只能等待 worker 完成或释放依赖的时间。
+- benchmark CSV 新增 `main_wait_ms` 字段，并在 profile summary 中输出 `main_wait_ms_avg`。
+- 归档 `main_wait_profile_smoke.csv`，确认该字段从 runtime stderr 到 CSV 和 summary 全链路可用。
+
+经验：
+
+- `worker_idle_ms` 只能说明 worker 是否缺活；它不能解释主线程在 panel barrier 或依赖释放不足时是否处于空等。`main_wait_ms` 可以作为后续跨 panel DAG、range task 和队列策略的关键路径症状指标。
+- 该指标只在 `COMPILER2026_DAG_PROFILE=1` 下采集，默认运行路径不增加计时调用。
+- 单次 VM profile 只能证明数据链路，不应把 `main_wait_ms` 的具体数值写成性能结论；后续要和不同线程数、block size 以及真实平台结果一起比较。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.833x`。
+- `LABEL=main_wait_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/main_wait_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.972876s contestant_total=0.648549s speedup_avg=1.567x speedup_geo=1.546x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5650.2`、`max_dag_successors=35`、`main_wait_ms_avg=1.481`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

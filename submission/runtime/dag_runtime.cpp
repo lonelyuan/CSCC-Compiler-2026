@@ -282,7 +282,12 @@ public:
                     }
                     dag_deadlock = true;
                 } else {
+                    const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+                    const std::uint64_t wait_start_ns = profiling ? nowNs() : 0;
                     done_cv_.wait(lock);
+                    if (profiling) {
+                        main_wait_ns_ += nowNs() - wait_start_ns;
+                    }
                     continue;
                 }
             }
@@ -528,6 +533,7 @@ private:
         total_queue_ns_ = 0;
         total_exec_ns_ = 0;
         worker_idle_ns_ = 0;
+        main_wait_ns_ = 0;
         submit_flushes_ = 0;
         dequeue_batches_ = 0;
         profile_dag_nodes_ = 0;
@@ -554,7 +560,8 @@ private:
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
                      "dag_nodes=%llu dag_edges=%llu dag_initial_ready=%llu "
                      "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
-                     "queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f\n",
+                     "queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
+                     "main_wait_ms=%.3f\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
                      static_cast<unsigned long long>(main_tasks_),
@@ -569,7 +576,8 @@ private:
                      max_dag_pending_, max_dag_successors_,
                      static_cast<double>(total_queue_ns_) / 1000000.0,
                      static_cast<double>(total_exec_ns_) / 1000000.0,
-                     static_cast<double>(worker_idle_ns_) / 1000000.0);
+                     static_cast<double>(worker_idle_ns_) / 1000000.0,
+                     static_cast<double>(main_wait_ns_) / 1000000.0);
 
         for (std::size_t i = 0; i < task_profile_count_; ++i) {
             const TaskProfile &profile = task_profiles_[i];
@@ -612,6 +620,7 @@ private:
     std::uint64_t total_queue_ns_ = 0;
     std::uint64_t total_exec_ns_ = 0;
     std::uint64_t worker_idle_ns_ = 0;
+    std::uint64_t main_wait_ns_ = 0;
     std::uint64_t submit_flushes_ = 0;
     std::uint64_t dequeue_batches_ = 0;
     std::uint64_t profile_dag_nodes_ = 0;

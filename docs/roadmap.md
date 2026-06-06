@@ -15,7 +15,7 @@
 - 核心数：`1, 2, 4, 8, 16, 32, 48, 64`，真实平台上再加入 NUMA 绑定实验。
 - 矩阵规模：公开 `n <= 10000` 范围内分层采样，包括 `n=512/768/1024/2048/4096/8192/10000`。
 - block size：覆盖小块、中块和大块，例如 `8, 16, 24, 32, 48, 64, 96, 128, 192, 256`。
-- 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率、每类算子耗时。
+- 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率、主线程 wait 空等时间、每类算子耗时。
 - 对比组：官方串行、当前 panel-barrier、不同线程数、不同异步阈值、未来 ready-queue DAG。
 
 结论不要只看单点 speedup，应使用几何平均和分层统计，避免对公开样例或 4 核 VM 过拟合。
@@ -70,7 +70,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - 根据 `n, b, block_count, thread_count` 自动选择粒度。
 - 收集轻量 profile，为下一次调用选择阈值。
 
-当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 async path 判定次数和原因、task 数、队列等待、执行时间、worker idle、批量出队、DAG 节点/边/释放/fanout 信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。benchmark 脚本已经能把这些统计沉淀为 CSV 字段。Pass 入口已经改为 runtime predicate，`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_DAG_THREADS` 能真实控制 async path，后续可以继续把这些 profile 数据用于驱动 `COMPILER2026_TASK_BATCH`、默认异步阈值、未来 range task 和跨 panel DAG 的收益判断。
+当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 async path 判定次数和原因、task 数、队列等待、执行时间、worker idle、主线程 wait 空等、批量出队、DAG 节点/边/释放/fanout 信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。benchmark 脚本已经能把这些统计沉淀为 CSV 字段。Pass 入口已经改为 runtime predicate，`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_DAG_THREADS` 能真实控制 async path，后续可以继续把这些 profile 数据用于驱动 `COMPILER2026_TASK_BATCH`、默认异步阈值、未来 range task 和跨 panel DAG 的收益判断。
 
 ### 4. 多核和 NUMA 亲和性
 
