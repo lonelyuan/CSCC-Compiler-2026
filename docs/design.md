@@ -153,6 +153,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
+- runtime 按 block 数预估 panel-local task 容量，并复用 ready queue、DAG node vector 和 latest-producer hash table 的容量。
 - runtime 根据 `b` 选择小批量提交和批量出队策略：`b <= 32` 使用更大的批量，`b > 128` 保持单任务粒度。
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
 - `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出 async path 判定次数和原因、任务数、队列等待时间、执行时间、worker idle 时间、批量出队信息、DAG 节点/边/释放/fanout 统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。

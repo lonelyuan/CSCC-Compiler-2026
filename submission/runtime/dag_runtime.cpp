@@ -121,6 +121,12 @@ public:
         if (reserve_tasks > tasks_.capacity()) {
             tasks_.reserve(reserve_tasks);
         }
+        if (reserve_tasks > dag_nodes_.capacity()) {
+            dag_nodes_.reserve(reserve_tasks);
+        }
+        if (reserve_tasks > latest_producer_.bucket_count()) {
+            latest_producer_.reserve(reserve_tasks);
+        }
         tasks_.clear();
         dag_nodes_.clear();
         latest_producer_.clear();

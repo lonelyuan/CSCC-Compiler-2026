@@ -269,3 +269,25 @@
 - `LABEL=ir_submit_counts_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 清理旧 benchmark 输出后通过，归档为 `docs/benchmark_results/ir_submit_counts_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，同时保留 overall、async decision 和 DAG profile summary。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 reserve DAG runtime structures
+
+改动：
+
+- `resetQueue` 复用已有 `reserveTaskCount(n, b)` 的容量提示，除 ready queue 外也预留 `dag_nodes` 和 `latest_producer`。
+- 该改动不改变依赖语义，只降低 panel-local DAG 提交阶段 vector 扩容和 hash table rehash 的风险。
+- 归档 `dag_reserve_structures_smoke.csv`，确认 IR submit 计数和 DAG profile counters 仍正常。
+
+经验：
+
+- ready queue 容量复用只覆盖任务就绪队列，不覆盖依赖图本身；panel 内 DAG 变大后，`dag_nodes` 和 producer map 也应该跟着预留。
+- `reserveTaskCount` 是保守容量提示，不是正确性条件。即使估算不足，容器仍会增长；估算过大也只影响容量，不改变调度结果。
+- 这类 runtime 结构优化需要用 correctness smoke 和 profile/IR counters 保证没有悄悄退回普通 submit 或破坏 DAG。
+
+验证：
+
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.832x`。
+- `LABEL=dag_reserve_structures_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_reserve_structures_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5673.8`、`max_dag_successors=35`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
