@@ -41,7 +41,7 @@ VM 原始输出：
 - 小/中等 `b` 的 task 在提交端按小批量 flush，worker/main 在队列积压时批量出队执行，降低 `madd` 密集阶段的锁竞争。
 - 批量大小按 `b` 分级选择，并可用 `COMPILER2026_TASK_BATCH` 在真实平台上覆盖调参。
 - 新增 `COMPILER2026_DAG_PROFILE=1` 观测模式，默认关闭；打开后 runtime 会向 stderr 输出 async path 判定次数和原因、task 数、队列等待、执行时间、worker idle、批量出队、DAG fanout，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。
-- Pass 从 `trsm/madd` 的 GEP offset 恢复一版 block key，调用 `compiler2026_runtime_submit_deps` 把依赖交给 runtime。
+- Pass 从 `trsm/madd` 的一维 `GEPOperator` offset 恢复一版 block key，调用 `compiler2026_runtime_submit_deps` 把依赖交给 runtime。
 - runtime 增加通用 ready-queue DAG：`madd(k,j,p)` 依赖对应两个 `trsm(k,p)` / `trsm(j,p)` 输出，`trsm` 阶段不再使用全局 wait；panel 末尾仍保留 wait，暂不跨 panel 调度。
 
 `b >= 16` 也做过实验，但在公开 benchmark 中触发段错误，已回退，不作为可交付配置。
@@ -116,10 +116,11 @@ docs/benchmark_results/async_decision_profile_smoke.csv
 docs/benchmark_results/async_decision_threads1_smoke.csv
 docs/benchmark_results/benchmark_overall_summary_smoke.csv
 docs/benchmark_results/dag_successor_fanout_smoke.csv
+docs/benchmark_results/gep_operator_key_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv`、`benchmark_overall_summary_smoke.csv` 和 `dag_successor_fanout_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、线程数开关、async decision 原因聚合、整体 summary 输出和 DAG successor fanout 统计行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv`、`benchmark_overall_summary_smoke.csv`、`dag_successor_fanout_smoke.csv` 和 `gep_operator_key_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、线程数开关、async decision 原因聚合、整体 summary 输出、DAG successor fanout 统计和 block key 恢复 smoke 行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
 
 ## 结论
 

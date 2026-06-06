@@ -7,6 +7,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -256,7 +257,7 @@ void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime
 
 std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Value *ptr,
                                            llvm::Value *b) {
-    auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr);
+    auto *gep = llvm::dyn_cast<llvm::GEPOperator>(ptr->stripPointerCasts());
     if (gep == nullptr || gep->getNumIndices() != 1) {
         return std::nullopt;
     }

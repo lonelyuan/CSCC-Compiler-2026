@@ -226,3 +226,25 @@
 - `LABEL=dag_successor_fanout_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_successor_fanout_smoke.csv`。
 - 本轮 profile summary 包含 `max_dag_successors=34`，同时保留 async decision、overall 和 DAG profile summary。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 GEPOperator block key recovery
+
+改动：
+
+- Pass 的 block key 恢复从只接受 `GetElementPtrInst` 扩展为接受 strip pointer casts 后的一维 `GEPOperator`。
+- 仍然只处理一维 GEP offset 并用 `offset / b` 生成 block key；更复杂地址表达式继续回退到原 submit/wait 路径。
+- 归档 `gep_operator_key_smoke.csv`，确认当前公开 IR 仍生成 `submit_deps`，DAG/profile counters 正常。
+
+经验：
+
+- LLVM IR 中 GEP 不一定总以 instruction 形态出现。把 key 恢复提升到 `GEPOperator` 可以覆盖 constant expression 和 cast 包裹形态，同时不改变当前依赖语义。
+- 这只是形态兼容性增强，不是完整 block-coordinate 分析。二维坐标、跨 panel 依赖和读写集合仍需要后续单独实现和验证。
+- 保留 fallback 很重要：一旦地址表达式超出当前模型，宁可回到保守 barrier，也不能生成错误依赖边。
+
+验证：
+
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.848x`。
+- 优化后 IR 包含 `compiler2026_runtime_submit_deps`，`compiler2026_task_trsm` 仍直接调用 `@trsm`，`compiler2026_task_madd` 仍直接调用 `@madd`。
+- `LABEL=gep_operator_key_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/gep_operator_key_smoke.csv`；summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5866.8`、`max_dag_successors=35`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
