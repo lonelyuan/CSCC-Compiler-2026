@@ -2,7 +2,7 @@
 
 本仓库是“动态算子图编译与并行调度”赛题的开发工程。项目目标是在 LLVM/BiSheng 编译器中增加 Pass，从官方分块 Cholesky baseline 的 IR 中识别 `cholesky`、`trsm`、`madd` 算子调用，分析可并行的算子依赖关系，并通过运行时任务调度提升多核执行性能。
 
-当前实现遵循编译器优化路线：不重写官方算法源码，不替换官方算子实现；Pass 在 IR 层克隆 async 版本、outline 算子任务函数、插入 runtime submit/wait 调用。官方 `trsm` 和 `madd` ABI 调用保留在 Pass 生成的 IR task function 内。
+当前实现遵循编译器优化路线：不重写官方算法源码，不替换官方算子实现；Pass 在 IR 层克隆 async 版本、outline 算子任务函数、恢复 block key，并插入 runtime submit/wait 或 submit_deps 调用。官方 `trsm` 和 `madd` ABI 调用保留在 Pass 生成的 IR task function 内。
 
 ## 项目结构
 
@@ -15,6 +15,7 @@
 │   ├── optimization_principles.md
 │   ├── performance.md
 │   ├── roadmap.md
+│   ├── engineering_log.md
 │   └── benchmark_results/
 ├── submission/
 │   ├── CMakeLists.txt
@@ -50,6 +51,7 @@
 - `docs/design.md`：实现级设计说明。
 - `docs/performance.md`：性能实验结果和 CSV 路径。
 - `docs/roadmap.md`：面向真实鲲鹏多核平台和决赛扩展数据的长期优化路线。
+- `docs/engineering_log.md`：记录每轮优化的验证结果、经验教训和后续约束。
 - `docs/benchmark_results/`：历史和当前 benchmark 结果。
 - 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
 - `contestant_sdk/`：官方 SDK、baseline、测试工具和公开 case。
@@ -109,7 +111,7 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 打开 runtime profile：
@@ -118,6 +120,14 @@ LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submiss
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
 SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh
+```
+
+benchmark 中打开同一开关会把 profile 字段写入 CSV：
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 生成提交包：

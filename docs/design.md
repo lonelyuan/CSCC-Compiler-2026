@@ -131,6 +131,8 @@ extern "C" void compiler2026_runtime_begin(int n, int b);
 extern "C" void compiler2026_runtime_register_task(void (*fn)(void *), const char *name);
 extern "C" void *compiler2026_runtime_alloc(std::size_t size);
 extern "C" void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
+extern "C" void compiler2026_runtime_submit_deps(
+    void (*fn)(void *), void *ctx, int dep_a, int dep_b, int output);
 extern "C" void compiler2026_runtime_wait();
 extern "C" void compiler2026_runtime_end();
 ```
@@ -139,6 +141,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 
 - `runtime_alloc` 为 Pass 生成的 task context 分配内存。
 - `runtime_submit` 只接收 task function 指针和 context 指针。
+- `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。
 - worker 线程从队列中取任务，调用 Pass 生成的 task function。
 - `wait` 等待队列为空且所有运行中任务完成；主线程也会参与执行队列任务。
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
@@ -147,8 +150,9 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - runtime 根据 `b` 选择小批量提交和批量出队策略：`b <= 32` 使用更大的批量，`b > 128` 保持单任务粒度。
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
 - `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出任务数、队列等待时间、执行时间、worker idle 时间、批量出队信息，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
+- benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV。
 
-Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
+Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；ready-queue DAG 只看整数 block key 的 producer/consumer 关系。实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
 
 ## 正确性保证
 
@@ -158,16 +162,18 @@ Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算�
 - `madd(row, col, panel)` 依赖对应的 `trsm(row, panel)` 和 `trsm(col, panel)`。
 - 下一 panel 的 `cholesky` 依赖前一 panel 的相关 `madd` 更新完成。
 
-Pass 插入的 wait 保证：
+Pass 和 runtime 当前共同保证：
 
-- 所有 `trsm` 任务完成后才进入 `madd` 阶段。
-- 所有 `madd` 任务完成后才进入下一 panel。
+- `trsm(row, panel)` 任务提交后，runtime 记录其输出 block key。
+- `madd(row, col, panel)` 任务依赖 `trsm(row, panel)` 和 `trsm(col, panel)` 对应的 latest producer；两个依赖完成后才进入 ready queue。
+- 所有 `madd` 任务完成后才进入下一 panel，避免跨 panel 依赖恢复不完整时破坏正确性。
 
-该策略是保守的 panel-barrier DAG，正确性优先。后续可以继续把 barrier 细化为真正的 ready-queue DAG。
+该策略是 panel 内 ready-queue DAG，正确性优先。后续可以继续把 panel 末尾 barrier 细化为跨 panel ready-queue DAG。
 
 ## 当前限制
 
-- 当前版本仍是 panel-barrier 调度，不是完全异步 DAG。
+- 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
+- block key 恢复依赖当前 baseline 的直接 GEP 形态；如果后续 IR 形态变化，Pass 会回退到原 submit/wait 路径。
 - 当前异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`b >= 16` 实验触发过段错误，已回退。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
@@ -187,7 +193,7 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 详细性能记录见 `docs/performance.md`。

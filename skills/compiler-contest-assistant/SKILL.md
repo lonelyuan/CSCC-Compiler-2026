@@ -36,8 +36,8 @@ source /etc/profile.d/bisheng.sh
 
 ## Current Project Layout
 
-- `submission/pass/dag_pass.cpp`: LLVM New PM pass. It clones an async version of `block_cholesky`, identifies official `trsm/madd` calls in IR, outlines task functions, and inserts runtime submit/wait calls.
-- `submission/runtime/dag_runtime.cpp`: generic task runtime with worker pool, queue, arena task-context allocation, and main-thread participation during wait.
+- `submission/pass/dag_pass.cpp`: LLVM New PM pass. It clones an async version of `block_cholesky`, identifies official `trsm/madd` calls in IR, outlines task functions, recovers first-pass block keys from GEP offsets, and inserts runtime submit/wait or dependency-aware submit calls.
+- `submission/runtime/dag_runtime.cpp`: generic task runtime with worker pool, ready queue, panel-local DAG dependencies, arena task-context allocation, optional profiling, and main-thread participation during wait.
 - `submission/scripts/build.sh`: build pass/runtime.
 - `submission/scripts/smoke_test.sh`: local VM correctness smoke test.
 - `submission/scripts/benchmark.sh`: benchmark selected public case ranges and write CSV.
@@ -138,18 +138,20 @@ If judge reports CE, first inspect package root layout, `CMakeLists.txt`, `manif
 
 ## Optimization Roadmap
 
-Current implementation is a conservative panel-barrier DAG:
+Current implementation is a panel-local ready-queue DAG:
 
 ```text
-cholesky(panel) -> all trsm(panel) -> wait -> all madd(panel) -> wait -> next panel
+cholesky(panel) -> trsm(panel) tasks
+madd(row,col,panel) depends on trsm(row,panel), trsm(col,panel)
+panel end waits before next panel
 ```
 
 Near-term improvements:
 
-- Recover block coordinates from IR GEPs and loop induction variables.
-- Build explicit dependencies for `trsm(row,panel)` and `madd(row,col,panel)`.
-- Replace panel-wide waits with ready-queue DAG scheduling where safe.
-- Add profiling counters for task count, queue time, worker idle time, and per-operator time.
+- Strengthen block-coordinate recovery beyond the current direct GEP-offset key.
+- Extend explicit dependencies across panel boundaries for `cholesky(panel+1)` and `trsm(row,panel+1)`.
+- Replace the remaining panel-end wait with ready-queue DAG scheduling where safe.
+- Add DAG profiling counters for dependency edges, ready releases, queue depth, and critical-path symptoms.
 - Make task granularity adaptive to `n`, `b`, block count, and thread count.
 
 Long-term improvements:

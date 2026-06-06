@@ -4,28 +4,28 @@
 
 ## 当前有效结果
 
-当前交付版本是 `runtime_submit_dequeue_batch`：
+当前交付版本是 `runtime_ready_queue_trsm_deps`：
 
 ```text
-docs/benchmark_results/runtime_submit_dequeue_batch.csv
+docs/benchmark_results/runtime_ready_queue_trsm_deps.csv
 ```
 
 VM 原始输出：
 
 ```text
-/root/bisheng/build/optimization_benchmarks/runtime_submit_dequeue_batch.csv
+/root/bisheng/build/optimization_benchmarks/runtime_ready_queue_trsm_deps.csv
 ```
 
 结果摘要：
 
 | Suite | serial avg | contestant avg | speedup |
 | --- | ---: | ---: | ---: |
-| `n512_576` | 0.087584s | 0.071685s | 1.222x |
-| `n768` | 0.228528s | 0.130410s | 1.752x |
-| `n1024` | 0.306042s | 0.166754s | 1.835x |
-| `n1152_small_b` | 0.365027s | 0.308254s | 1.184x |
+| `n512_576` | 0.087846s | 0.070130s | 1.253x |
+| `n768` | 0.226105s | 0.126036s | 1.794x |
+| `n1024` | 0.307123s | 0.165824s | 1.852x |
+| `n1152_small_b` | 0.362749s | 0.290902s | 1.247x |
 
-四个 suite 平均加速比的几何平均约为 `1.469x`。所有 contestant 输出均通过 verifier。
+四个 suite 平均加速比的几何平均约为 `1.509x`。所有 contestant 输出均通过 verifier。
 
 ## 本轮优化变化
 
@@ -40,6 +40,8 @@ VM 原始输出：
 - 小/中等 `b` 的 task 在提交端按小批量 flush，worker/main 在队列积压时批量出队执行，降低 `madd` 密集阶段的锁竞争。
 - 批量大小按 `b` 分级选择，并可用 `COMPILER2026_TASK_BATCH` 在真实平台上覆盖调参。
 - 新增 `COMPILER2026_DAG_PROFILE=1` 观测模式，默认关闭；打开后 runtime 会向 stderr 输出 task 数、队列等待、执行时间、worker idle、批量出队，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。
+- Pass 从 `trsm/madd` 的 GEP offset 恢复一版 block key，调用 `compiler2026_runtime_submit_deps` 把依赖交给 runtime。
+- runtime 增加通用 ready-queue DAG：`madd(k,j,p)` 依赖对应两个 `trsm(k,p)` / `trsm(j,p)` 输出，`trsm` 阶段不再使用全局 wait；panel 末尾仍保留 wait，暂不跨 panel 调度。
 
 `b >= 16` 也做过实验，但在公开 benchmark 中触发段错误，已回退，不作为可交付配置。
 
@@ -50,6 +52,16 @@ source /etc/profile.d/bisheng.sh
 cd /root/bisheng
 SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh
 ```
+
+benchmark 中打开同一个环境变量时，脚本会把 profile stderr 捕获到每个 suite 目录下的 `contestant_<run>.profile`，并把解析后的字段写入 CSV：
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+```
+
+新增 CSV 字段包括 `profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
 
 示例输出节选：
 
@@ -75,7 +87,7 @@ SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 ## 历史结果说明
@@ -89,18 +101,25 @@ docs/benchmark_results/after_madd_coarsening.csv
 docs/benchmark_results/ir_loop_pass_final.csv
 docs/benchmark_results/ir_outlined_task_pass.csv
 docs/benchmark_results/ir_async_threshold32.csv
+docs/benchmark_results/runtime_submit_dequeue_batch.csv
+docs/benchmark_results/runtime_ready_queue_trsm_deps.csv
+docs/benchmark_results/profile_csv_smoke.csv
+docs/benchmark_results/ready_queue_profile_csv_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
+`profile_csv_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段和聚合逻辑，不作为正式性能均值。
 
 ## 结论
 
-当前方案仍是保守的 panel-barrier DAG：
+当前方案是 panel 内 ready-queue DAG：
 
 - Pass 分析官方 baseline IR 中的 `trsm/madd` call 和 loop exit。
 - 原始 `block_cholesky` 保留为小 block 串行路径。
 - async clone 中的 `trsm/madd` call site 被替换为通用任务提交。
+- `madd` 任务通过 block key 依赖对应两个 `trsm` 输出，runtime 在依赖满足时放入 ready queue。
+- panel 末尾仍保留 wait，下一 panel 暂不提前启动。
 - Pass 生成的 task function 内直接调用官方 `trsm/madd` ABI。
 - runtime 不包含算子专用 wrapper，不替换官方算子实现。
 
-后续更大的性能空间来自真正的 block-coordinate ready queue DAG：让下一 panel 在其依赖 block 更新完成后提前启动，而不是等待整个 trailing matrix 更新完成。
+后续更大的性能空间来自跨 panel 的 block-coordinate ready queue DAG：让下一 panel 在其依赖 block 更新完成后提前启动，而不是等待整个 trailing matrix 更新完成。

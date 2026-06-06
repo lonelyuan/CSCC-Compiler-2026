@@ -12,6 +12,7 @@ CLANG_BIN="${CLANG:-/opt/bisheng/bin/clang++}"
 OPT_BIN="${OPT:-/opt/bisheng/bin/opt}"
 LLVM_LINK_BIN="${LLVM_LINK:-/opt/bisheng/bin/llvm-link}"
 THREADS="${COMPILER2026_DAG_THREADS:-4}"
+PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
 REPEAT="${REPEAT:-3}"
 LABEL="${LABEL:-run}"
 
@@ -64,7 +65,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,serial_seconds,contestant_seconds,speedup" > "${CSV}"
+echo "label,suite,repeat,threads,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -86,11 +87,16 @@ run_suite() {
       "${suite_dir}/input.bin" \
       "${suite_dir}/serial_${run}.out"
 
-    COMPILER2026_TIMING_FILE="${suite_dir}/contestant_${run}.time" \
-    COMPILER2026_DAG_THREADS="${THREADS}" \
-      "${BENCH_DIR}/bin/contestant_app" \
-      "${suite_dir}/input.bin" \
-      "${suite_dir}/contestant_${run}.out"
+    if ! COMPILER2026_TIMING_FILE="${suite_dir}/contestant_${run}.time" \
+      COMPILER2026_DAG_THREADS="${THREADS}" \
+      COMPILER2026_DAG_PROFILE="${PROFILE}" \
+        "${BENCH_DIR}/bin/contestant_app" \
+        "${suite_dir}/input.bin" \
+        "${suite_dir}/contestant_${run}.out" \
+        2> "${suite_dir}/contestant_${run}.profile"; then
+      cat "${suite_dir}/contestant_${run}.profile" >&2
+      exit 1
+    fi
 
     if [[ "${run}" == "1" ]]; then
       VERIFIER_THREADS="${VERIFIER_THREADS:-4}" \
@@ -99,15 +105,93 @@ run_suite() {
         "${suite_dir}/contestant_${run}.out" > "${suite_dir}/contestant.verify"
     fi
 
-    python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" \
+    python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${PROFILE}" \
       "${suite_dir}/serial_${run}.time" \
-      "${suite_dir}/contestant_${run}.time" >> "${CSV}" <<'PY'
+      "${suite_dir}/contestant_${run}.time" \
+      "${suite_dir}/contestant_${run}.profile" >> "${CSV}" <<'PY'
+import csv
+import re
 import sys
-label, suite, run, threads, serial_path, contestant_path = sys.argv[1:]
+
+label, suite, run, threads, profile_enabled, serial_path, contestant_path, profile_path = sys.argv[1:]
 serial = float(open(serial_path).read())
 contestant = float(open(contestant_path).read())
 speedup = serial / contestant if contestant > 0 else float("inf")
-print(f"{label},{suite},{run},{threads},{serial:.9f},{contestant:.9f},{speedup:.6f}")
+
+profile_calls = 0
+summary_counts = {
+    "tasks": 0,
+    "main_tasks": 0,
+    "worker_tasks": 0,
+    "flushes": 0,
+    "dequeue_batches": 0,
+}
+summary_max = {
+    "max_batch": 0,
+    "max_ready": 0,
+}
+summary_ms = {
+    "queue_ms": 0.0,
+    "exec_ms": 0.0,
+    "worker_idle_ms": 0.0,
+}
+tasks = {
+    "trsm": {"count": 0, "queue_ms": 0.0, "exec_ms": 0.0},
+    "madd": {"count": 0, "queue_ms": 0.0, "exec_ms": 0.0},
+}
+pair_re = re.compile(r"([A-Za-z_]+)=([^ ]+)")
+
+try:
+    lines = open(profile_path).read().splitlines()
+except FileNotFoundError:
+    lines = []
+
+for line in lines:
+    if line.startswith("[compiler2026_profile] "):
+        profile_calls += 1
+        values = dict(pair_re.findall(line))
+        for key in summary_counts:
+            summary_counts[key] += int(values.get(key, "0"))
+        for key in summary_max:
+            summary_max[key] = max(summary_max[key], int(values.get(key, "0")))
+        for key in summary_ms:
+            summary_ms[key] += float(values.get(key, "0"))
+    elif line.startswith("[compiler2026_profile_task] "):
+        values = dict(pair_re.findall(line))
+        name = values.get("name")
+        if name in tasks:
+            tasks[name]["count"] += int(values.get("count", "0"))
+            tasks[name]["queue_ms"] += float(values.get("queue_ms", "0"))
+            tasks[name]["exec_ms"] += float(values.get("exec_ms", "0"))
+
+writer = csv.writer(sys.stdout, lineterminator="\n")
+writer.writerow([
+    label,
+    suite,
+    run,
+    threads,
+    "1" if profile_enabled not in ("", "0") else "0",
+    f"{serial:.9f}",
+    f"{contestant:.9f}",
+    f"{speedup:.6f}",
+    profile_calls,
+    summary_counts["tasks"],
+    summary_counts["main_tasks"],
+    summary_counts["worker_tasks"],
+    summary_counts["flushes"],
+    summary_counts["dequeue_batches"],
+    summary_max["max_batch"],
+    summary_max["max_ready"],
+    f"{summary_ms['queue_ms']:.3f}",
+    f"{summary_ms['exec_ms']:.3f}",
+    f"{summary_ms['worker_idle_ms']:.3f}",
+    tasks["trsm"]["count"],
+    f"{tasks['trsm']['queue_ms']:.3f}",
+    f"{tasks['trsm']['exec_ms']:.3f}",
+    tasks["madd"]["count"],
+    f"{tasks['madd']['queue_ms']:.3f}",
+    f"{tasks['madd']['exec_ms']:.3f}",
+])
 PY
   done
 }
@@ -131,5 +215,13 @@ for suite in sorted({r["suite"] for r in rows}):
         f"contestant_avg={statistics.mean(contestant):.6f}s "
         f"speedup_avg={statistics.mean(vals):.3f}x"
     )
+if rows and any(r.get("profile_enabled") == "1" for r in rows):
+    task_rows = [r for r in rows if int(r.get("total_tasks") or 0) > 0]
+    if task_rows:
+        print(
+            "profile: "
+            f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
+            f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
+            f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f}"
+        )
 PY
-

@@ -13,6 +13,7 @@
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ namespace {
 constexpr const char *kBegin = "compiler2026_runtime_begin";
 constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
+constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
 constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
@@ -31,6 +33,7 @@ struct RuntimeApi {
     llvm::FunctionCallee begin;
     llvm::FunctionCallee alloc;
     llvm::FunctionCallee submit;
+    llvm::FunctionCallee submit_deps;
     llvm::FunctionCallee register_task;
     llvm::FunctionCallee wait;
     llvm::FunctionCallee end;
@@ -78,6 +81,7 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         declareVoidRuntime(module, kBegin, {int32_ty, int32_ty}),
         module.getOrInsertFunction(kAlloc, alloc_ty),
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
+        declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kRegisterTask, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kWait, {}),
         declareVoidRuntime(module, kEnd, {}),
@@ -245,6 +249,64 @@ void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime
     call->eraseFromParent();
 }
 
+std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Value *ptr,
+                                           llvm::Value *b) {
+    auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr);
+    if (gep == nullptr || gep->getNumIndices() != 1) {
+        return std::nullopt;
+    }
+
+    llvm::Value *offset = gep->getOperand(1);
+    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, offset->getType());
+    llvm::Value *element_block = builder.CreateSDiv(offset, wide_b);
+    return builder.CreateTruncOrBitCast(element_block, builder.getInt32Ty());
+}
+
+bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
+                                      TaskIr &task_ir, llvm::Function *task_fn,
+                                      llvm::Value *b, llvm::ArrayRef<unsigned> dep_args,
+                                      unsigned output_arg) {
+    llvm::Module *module = call->getModule();
+    llvm::IRBuilder<> builder(call);
+
+    std::vector<llvm::Value *> dep_keys;
+    dep_keys.reserve(2);
+    for (unsigned arg_index : dep_args) {
+        std::optional<llvm::Value *> key = buildBlockKey(builder, call->getArgOperand(arg_index), b);
+        if (!key) {
+            return false;
+        }
+        dep_keys.push_back(*key);
+    }
+
+    while (dep_keys.size() < 2) {
+        dep_keys.push_back(builder.getInt32(-1));
+    }
+
+    std::optional<llvm::Value *> output_key =
+        buildBlockKey(builder, call->getArgOperand(output_arg), b);
+    if (!output_key) {
+        return false;
+    }
+
+    const llvm::DataLayout &layout = module->getDataLayout();
+    const uint64_t context_size = layout.getTypeAllocSize(task_ir.context_ty).getFixedValue();
+    llvm::Type *size_ty =
+        llvm::IntegerType::get(module->getContext(), layout.getPointerSizeInBits());
+
+    llvm::Value *context = builder.CreateCall(
+        runtime.alloc, {llvm::ConstantInt::get(size_ty, context_size)});
+
+    for (unsigned i = 0; i < 5; ++i) {
+        builder.CreateStore(call->getArgOperand(i), fieldPtr(builder, task_ir.context_ty, context, i));
+    }
+
+    builder.CreateCall(runtime.submit_deps,
+                       {task_fn, context, dep_keys[0], dep_keys[1], *output_key});
+    call->eraseFromParent();
+    return true;
+}
+
 void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir) {
     llvm::DominatorTree dominator_tree(async_fn);
     llvm::LoopInfo loop_info(dominator_tree);
@@ -285,9 +347,12 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
     std::set<llvm::BasicBlock *> wait_blocks;
 
     for (llvm::CallBase *call : trsm_calls) {
-        llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-        addLoopExitWaits(loop, runtime.wait, wait_blocks);
-        replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
+        if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
+                                              b, {}, 0)) {
+            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+            addLoopExitWaits(loop, runtime.wait, wait_blocks);
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
+        }
     }
 
     for (llvm::CallBase *call : madd_calls) {
@@ -295,7 +360,10 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
         llvm::Loop *sync_loop =
             (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
         addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
-        replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
+        if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
+                                              b, {0, 1}, 2)) {
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
+        }
     }
 
     for (llvm::BasicBlock &block : async_fn) {

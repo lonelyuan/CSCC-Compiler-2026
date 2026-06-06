@@ -36,13 +36,21 @@ cholesky(panel, panel)
 
 ### 2. Ready-Queue DAG
 
-当前依赖模型：
+上一版依赖模型：
 
 ```text
 cholesky(panel) -> all trsm(panel) -> all madd(panel) -> next panel
 ```
 
-更好的模型：
+当前已经落地一层 panel 内 ready queue：
+
+```text
+trsm(r, p) has no async predecessor after cholesky(p)
+madd(r, c, p) depends on trsm(r, p), trsm(c, p)
+panel end still waits before cholesky(p+1)
+```
+
+更完整的模型：
 
 ```text
 trsm(r, p) depends on cholesky(p)
@@ -51,7 +59,7 @@ cholesky(p+1) depends only on updates to block (p+1, p+1)
 trsm(r, p+1) depends on updates to block (r, p+1)
 ```
 
-这能让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成，是大核数平台上最重要的性能空间。
+当前实现已经去掉 `trsm` 阶段全局 wait，让 `madd` 在对应两个 `trsm` 完成后进入 ready queue。下一步才是让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成；这是大核数平台上最重要的性能空间。
 
 ### 3. 运行时任务粒度自适应
 
@@ -62,7 +70,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - 根据 `n, b, block_count, thread_count` 自动选择粒度。
 - 收集轻量 profile，为下一次调用选择阈值。
 
-当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 task 数、队列等待、执行时间、worker idle、批量出队信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。下一步应把这些统计沉淀为 benchmark CSV 字段，并用它们驱动 `COMPILER2026_TASK_BATCH`、异步阈值和未来 range task 的自动选择。
+当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 task 数、队列等待、执行时间、worker idle、批量出队信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。benchmark 脚本已经能把这些统计沉淀为 CSV 字段。下一步应用它们驱动 `COMPILER2026_TASK_BATCH`、异步阈值和未来 range task 的自动选择。
 
 ### 4. 多核和 NUMA 亲和性
 
@@ -95,9 +103,9 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 ## 当前瓶颈
 
-- Panel barrier 过保守，限制大核数可扩展性。
-- Pass 还没有通用恢复数组子块坐标和读写集合。
+- Panel 末尾 barrier 仍过保守，限制大核数可扩展性。
+- Pass 已有一版基于 GEP offset 的 block key 恢复，但还不是通用数组子块坐标和读写集合分析。
 - Runtime 仍以单全局队列为核心，虽然已有批量提交/出队缓解，扩展到 32 核以上仍可能出现锁竞争。
-- 阈值和 task batch 大小仍来自经验测试；runtime 已能输出 profile，但尚未将 profile 闭环成自动 heuristic。
+- 阈值和 task batch 大小仍来自经验测试；runtime 和 benchmark 已能记录 profile，但尚未将 profile 闭环成自动 heuristic。
 
 短期目标是把 `trsm/madd` 的坐标和依赖边从 IR 中恢复出来；中期目标是生成 ready-queue DAG；长期目标是把这个 pass 做成可解释、可迁移的 tiled linear algebra taskization pass。

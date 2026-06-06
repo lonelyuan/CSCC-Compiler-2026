@@ -29,7 +29,7 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 Enable runtime profiling for an async case:
@@ -38,6 +38,15 @@ Enable runtime profiling for an async case:
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
 SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh
+```
+
+When the same profile flag is used with `benchmark.sh`, parsed profile metrics
+are written into the benchmark CSV next to the timing fields:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 Package artifacts:
@@ -62,11 +71,12 @@ Current implementation:
 - It keeps the original function body as the small-block serial path.
 - It clones an async implementation for `b >= 32`, keeps `cholesky`
   synchronous, outlines async-path `trsm` and `madd`
-  calls into generated IR task functions, and inserts waits at loop exits.
+  calls into generated IR task functions, recovers block keys from GEP
+  offsets, and inserts dependency-aware runtime submits plus panel-end waits.
 - The runtime is a generic reusable task scheduler with arena context
-  allocation, adaptive task submit/dequeue batching, and an opt-in profiling
-  mode. Official `trsm` and `madd` ABI calls remain in Pass-generated IR task
-  functions.
+  allocation, adaptive task submit/dequeue batching, an opt-in profiling mode,
+  and a panel-local ready queue for `trsm` to `madd` dependencies. Official
+  `trsm` and `madd` ABI calls remain in Pass-generated IR task functions.
 - No source annotations are required.
 
 Documentation:
@@ -78,3 +88,5 @@ Documentation:
 - `optimization_principles.md`: beginner-friendly explanation of
   parallelization and operator DAG scheduling.
 - `roadmap.md`: longer-term scaling notes.
+- `engineering_log.md`: verified lessons and constraints from each
+  optimization step.

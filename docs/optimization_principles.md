@@ -275,6 +275,8 @@ void compiler2026_runtime_begin(int n, int b);
 void compiler2026_runtime_register_task(void (*fn)(void *), const char *name);
 void *compiler2026_runtime_alloc(size_t size);
 void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
+void compiler2026_runtime_submit_deps(
+    void (*fn)(void *), void *ctx, int dep_a, int dep_b, int output);
 void compiler2026_runtime_wait();
 void compiler2026_runtime_end();
 ```
@@ -289,6 +291,8 @@ void compiler2026_runtime_end();
 
 `runtime_register_task` 只在打开 `COMPILER2026_DAG_PROFILE=1` 时给统计输出提供名字，例如 `trsm`、`madd`；它不改变任务执行方式，也不把官方算子封装进 runtime。
 
+`runtime_submit_deps` 是第一版动态 DAG 接口。Pass 从 `L[row*n+col]` 这类 GEP offset 中算出 block key，把 `madd` 的两个输入 block key 和输出 block key 交给 runtime。runtime 只维护“哪个 key 最近由哪个 task 生产”和 successor 列表，不需要知道 Cholesky 的数学含义。
+
 当前 runtime 做了几项优化：
 
 - thread-local worker 池复用，避免每个矩阵反复创建线程。
@@ -298,6 +302,9 @@ void compiler2026_runtime_end();
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销。
 - 可选输出 task 数、队列等待、执行时间和 worker idle 等 profile 指标。
+- 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
+
+benchmark 脚本会把这些 profile 行解析进 CSV。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。
 
 简化执行流程：
 

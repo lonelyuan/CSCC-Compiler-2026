@@ -11,7 +11,9 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -38,6 +40,7 @@ class AsyncRuntime {
         TaskFn fn;
         void *context;
         std::uint64_t enqueue_ns;
+        int dag_node = -1;
     };
 
     struct BatchProfile {
@@ -53,6 +56,14 @@ class AsyncRuntime {
         std::uint64_t count = 0;
         std::uint64_t queue_ns = 0;
         std::uint64_t exec_ns = 0;
+    };
+
+    struct DagNode {
+        TaskFn fn = nullptr;
+        void *context = nullptr;
+        int pending = 0;
+        bool completed = false;
+        std::vector<int> successors;
     };
 
 public:
@@ -111,6 +122,9 @@ public:
             tasks_.reserve(reserve_tasks);
         }
         tasks_.clear();
+        dag_nodes_.clear();
+        latest_producer_.clear();
+        pending_dag_tasks_ = 0;
         task_head_ = 0;
         chunk_offset_ = 0;
         pending_count_ = 0;
@@ -142,13 +156,65 @@ public:
         enqueueTask(task);
     }
 
+    void submitWithDeps(TaskFn fn, void *context, int dep_a, int dep_b, int output) {
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        if (workers_.empty()) {
+            Task task{fn, context, profiling ? nowNs() : 0};
+            BatchProfile profile = runBatch(&task, 1, profiling);
+            if (profiling) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                recordBatchProfileLocked(&task, 1, profile, false);
+            }
+            return;
+        }
+
+        bool should_notify = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const int node_index = static_cast<int>(dag_nodes_.size());
+            dag_nodes_.push_back({fn, context, 0, false, {}});
+            ++pending_dag_tasks_;
+
+            const int deps[] = {dep_a, dep_b};
+            for (int i = 0; i < 2; ++i) {
+                const int dep = deps[i];
+                if (dep < 0 || (i == 1 && dep == deps[0])) {
+                    continue;
+                }
+
+                auto producer = latest_producer_.find(dep);
+                if (producer == latest_producer_.end()) {
+                    continue;
+                }
+
+                DagNode &producer_node = dag_nodes_[producer->second];
+                if (!producer_node.completed) {
+                    producer_node.successors.push_back(node_index);
+                    ++dag_nodes_[node_index].pending;
+                }
+            }
+
+            if (output >= 0) {
+                latest_producer_[output] = node_index;
+            }
+
+            if (dag_nodes_[node_index].pending == 0) {
+                enqueueTaskLocked({fn, context, profiling ? nowNs() : 0, node_index});
+                should_notify = (tasks_.size() - task_head_) <= workers_.size();
+            }
+        }
+
+        if (should_notify) {
+            work_cv_.notify_one();
+        }
+    }
+
     void enqueueTask(Task task) {
         bool should_notify = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.push_back(task);
+            enqueueTaskLocked(task);
             const std::size_t ready = tasks_.size() - task_head_;
-            updateMaxReadyLocked(ready);
             should_notify = ready <= workers_.size();
         }
         if (should_notify) {
@@ -180,16 +246,24 @@ public:
         while (true) {
             std::array<Task, kMaxTaskBatch> batch{};
             std::size_t batch_count = 0;
+            bool dag_deadlock = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 if (task_head_ < tasks_.size()) {
                     batch_count = takeReadyTasksLocked(batch.data());
                 } else if (active_tasks_ == 0) {
-                    break;
+                    if (pending_dag_tasks_ == 0) {
+                        break;
+                    }
+                    dag_deadlock = true;
                 } else {
                     done_cv_.wait(lock);
                     continue;
                 }
+            }
+
+            if (dag_deadlock) {
+                throw std::runtime_error("compiler2026 runtime DAG has unresolved dependencies");
             }
 
             BatchProfile profile =
@@ -199,7 +273,11 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 active_tasks_ -= batch_count;
+                const bool released = completeDagTasksLocked(batch.data(), batch_count);
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
+                if (released) {
+                    work_cv_.notify_all();
+                }
                 if (tasks_.empty() && active_tasks_ == 0) {
                     done_cv_.notify_all();
                 }
@@ -237,7 +315,11 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 active_tasks_ -= batch_count;
+                const bool released = completeDagTasksLocked(batch.data(), batch_count);
                 recordBatchProfileLocked(batch.data(), batch_count, profile, true);
+                if (released) {
+                    work_cv_.notify_all();
+                }
                 if (tasks_.empty() && active_tasks_ == 0) {
                     done_cv_.notify_all();
                 }
@@ -280,6 +362,40 @@ private:
             task_head_ = 0;
         }
         return count;
+    }
+
+    void enqueueTaskLocked(Task task) {
+        tasks_.push_back(task);
+        updateMaxReadyLocked(tasks_.size() - task_head_);
+    }
+
+    bool completeDagTasksLocked(const Task *batch, std::size_t count) {
+        bool released = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            const int node_index = batch[i].dag_node;
+            if (node_index < 0) {
+                continue;
+            }
+
+            DagNode &node = dag_nodes_[static_cast<std::size_t>(node_index)];
+            if (node.completed) {
+                continue;
+            }
+            node.completed = true;
+            --pending_dag_tasks_;
+
+            for (int successor_index : node.successors) {
+                DagNode &successor = dag_nodes_[static_cast<std::size_t>(successor_index)];
+                --successor.pending;
+                if (successor.pending == 0) {
+                    enqueueTaskLocked({successor.fn, successor.context,
+                                       profile_enabled_.load(std::memory_order_relaxed) ? nowNs() : 0,
+                                       successor_index});
+                    released = true;
+                }
+            }
+        }
+        return released;
     }
 
     std::size_t chooseBatchCount(std::size_t available) const {
@@ -422,6 +538,9 @@ private:
 
     std::vector<std::thread> workers_;
     std::vector<Task> tasks_;
+    std::vector<DagNode> dag_nodes_;
+    std::unordered_map<int, int> latest_producer_;
+    std::size_t pending_dag_tasks_ = 0;
     std::array<Task, kMaxTaskBatch> pending_tasks_{};
     std::size_t task_head_ = 0;
     std::size_t pending_count_ = 0;
@@ -567,6 +686,11 @@ extern "C" void *compiler2026_runtime_alloc(std::size_t size) {
 
 extern "C" void compiler2026_runtime_submit(TaskFn fn, void *context) {
     activeRuntime().submit(fn, context);
+}
+
+extern "C" void compiler2026_runtime_submit_deps(TaskFn fn, void *context,
+                                                  int dep_a, int dep_b, int output) {
+    activeRuntime().submitWithDeps(fn, context, dep_a, dep_b, output);
 }
 
 extern "C" void compiler2026_runtime_wait() {

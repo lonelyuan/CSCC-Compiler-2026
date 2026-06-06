@@ -1,0 +1,5 @@
+label,suite,repeat,threads,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms
+ready_queue_profile_csv_smoke,n512_576,1,4,1,0.089244329,0.070262024,1.270165,6,2852,607,2245,0,1019,16,120,176.102,43.251,12.995,428,11.296,11.953,2424,164.805,31.299
+ready_queue_profile_csv_smoke,n768,1,4,1,0.229689970,0.126683238,1.813105,7,3913,853,3060,0,1169,16,200,530.571,165.990,38.354,514,19.363,40.469,3399,511.207,125.520
+ready_queue_profile_csv_smoke,n1024,1,4,1,0.310300429,0.165085873,1.879630,4,6880,1502,5378,0,1254,16,403,1721.106,235.239,46.099,650,32.161,51.870,6230,1688.946,183.370
+ready_queue_profile_csv_smoke,n1152_small_b,1,4,1,0.360641934,0.299155468,1.205533,2,14352,3000,11352,0,2200,16,487,3641.667,94.035,13.470,1126,46.555,8.588,13226,3595.112,85.446
