@@ -29,7 +29,7 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=ir_loop_pass_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 Package artifacts:
@@ -43,8 +43,9 @@ cd /root/bisheng
 Current implementation:
 
 - The pass analyzes the official `contest::block_cholesky` IR with LoopInfo.
-- It keeps `cholesky` synchronous, replaces optimized-path `trsm` and `madd`
-  calls with runtime task submissions, and inserts waits at loop exits.
+- It keeps `cholesky` synchronous, outlines optimized-path `trsm` and `madd`
+  calls into generated IR task functions, and inserts waits at loop exits.
 - It clones the original IR as a serial fallback for small block sizes.
-- The runtime calls the official `trsm` and `madd` ABI from worker threads.
+- The runtime is a generic task scheduler. Official `trsm` and `madd` ABI calls
+  remain in Pass-generated IR task functions.
 - No source annotations are required.

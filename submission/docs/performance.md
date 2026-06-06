@@ -4,26 +4,26 @@
 
 ## 当前有效结果
 
-当前交付版本是 `ir_loop_pass_final`：
+当前交付版本是 `ir_outlined_task_pass`：
 
 ```text
-submission/docs/benchmark_results/ir_loop_pass_final.csv
+submission/docs/benchmark_results/ir_outlined_task_pass.csv
 ```
 
 VM 原始输出：
 
 ```text
-/root/bisheng/build/optimization_benchmarks/ir_loop_pass_final.csv
+/root/bisheng/build/optimization_benchmarks/ir_outlined_task_pass.csv
 ```
 
 结果摘要：
 
 | Suite | serial avg | contestant avg | speedup |
 | --- | ---: | ---: | ---: |
-| `n512_576` | 0.088756s | 0.085000s | 1.044x |
-| `n768` | 0.232610s | 0.158435s | 1.468x |
-| `n1024` | 0.308554s | 0.201376s | 1.532x |
-| `n1152_small_b` | 0.363727s | 0.383082s | 0.950x |
+| `n512_576` | 0.086509s | 0.080239s | 1.078x |
+| `n768` | 0.225177s | 0.151179s | 1.490x |
+| `n1024` | 0.305020s | 0.195797s | 1.558x |
+| `n1152_small_b` | 0.357749s | 0.362946s | 0.986x |
 
 所有 contestant 输出均通过 verifier。
 
@@ -43,7 +43,7 @@ VM 原始输出：
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=ir_loop_pass_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 ## 历史结果说明
@@ -63,9 +63,10 @@ submission/docs/benchmark_results/after_madd_coarsening.csv
 当前 IR-level Pass 相比旧函数替换版本性能下降，但结构更符合赛题要求：
 
 - Pass 直接分析官方 baseline IR。
-- Pass 基于 `LoopInfo` 插入 runtime begin/submit/wait/end。
+- Pass 基于 `LoopInfo` 插入 runtime begin/alloc/submit/wait/end。
 - 原始 `block_cholesky` 循环结构仍保留。
-- `trsm/madd` 原始 call 在 optimized path 中被替换为异步任务提交。
+- `trsm/madd` 原始 call 被 outline 到 Pass 生成的 task function，task function 内直接调用官方 ABI。
+- optimized path 的原始 call site 被替换为通用任务提交，而不是 runtime 中的算子专用 wrapper。
 - 小 block 走由原始 IR 克隆出的 serial fallback。
 
 后续优化方向：
@@ -74,4 +75,3 @@ submission/docs/benchmark_results/after_madd_coarsening.csv
 - 在 Pass 层识别 block 坐标表达式，为 `madd` 合并和依赖注册提供 IR 级信息。
 - 对小 block fallback 进一步降低版本化开销。
 - 将 `b >= 64` 的阈值改为 runtime/profile 驱动策略。
-

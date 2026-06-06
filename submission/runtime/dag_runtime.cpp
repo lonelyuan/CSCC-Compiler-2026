@@ -4,19 +4,15 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
+#include <new>
 #include <thread>
 #include <vector>
 
-extern "C" {
-void trsm(double *A, double *L, double *X, int b, int lda);
-void madd(double *A, double *B, double *C, int b, int lda);
-}
-
 namespace {
+
+using TaskFn = void (*)(void *);
 
 class AsyncRuntime {
 public:
@@ -42,15 +38,16 @@ public:
         }
     }
 
-    void submit(std::function<void()> task) {
+    void submit(TaskFn fn, void *context) {
         if (workers_.empty()) {
-            task();
+            fn(context);
+            std::free(context);
             return;
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.push_back(std::move(task));
+            tasks_.push_back({fn, context});
         }
         work_cv_.notify_one();
     }
@@ -73,28 +70,34 @@ public:
     }
 
 private:
+    struct Task {
+        TaskFn fn;
+        void *context;
+    };
+
     void workerLoop() {
         while (true) {
-            std::function<void()> task;
+            Task task{};
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 work_cv_.wait(lock, [this]() { return stopping_ || !tasks_.empty(); });
                 if (stopping_ && tasks_.empty()) {
                     return;
                 }
-                task = std::move(tasks_.front());
+                task = tasks_.front();
                 tasks_.pop_front();
                 ++active_tasks_;
             }
 
             try {
-                task();
+                task.fn(task.context);
             } catch (...) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!worker_error_) {
                     worker_error_ = std::current_exception();
                 }
             }
+            std::free(task.context);
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -107,7 +110,7 @@ private:
     }
 
     std::vector<std::thread> workers_;
-    std::deque<std::function<void()>> tasks_;
+    std::deque<Task> tasks_;
     std::mutex mutex_;
     std::condition_variable work_cv_;
     std::condition_variable done_cv_;
@@ -143,13 +146,6 @@ std::size_t resolveThreadCount(int n, int b) {
     return std::max<std::size_t>(1, std::min<std::size_t>(threads, block_count));
 }
 
-AsyncRuntime &activeRuntime() {
-    if (!runtime) {
-        runtime = std::make_unique<AsyncRuntime>(std::thread::hardware_concurrency());
-    }
-    return *runtime;
-}
-
 int asyncMinBlockSize() {
     int threshold = 64;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
@@ -162,6 +158,13 @@ int asyncMinBlockSize() {
     return threshold;
 }
 
+AsyncRuntime &activeRuntime() {
+    if (!runtime) {
+        runtime = std::make_unique<AsyncRuntime>(std::thread::hardware_concurrency());
+    }
+    return *runtime;
+}
+
 }  // namespace
 
 extern "C" void compiler2026_runtime_begin(int n, int b) {
@@ -169,22 +172,16 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
     runtime = std::make_unique<AsyncRuntime>(threads);
 }
 
-extern "C" void compiler2026_runtime_submit_trsm(double *A, double *L, double *X, int b,
-                                                  int lda) {
-    if (b < asyncMinBlockSize()) {
-        trsm(A, L, X, b, lda);
-        return;
+extern "C" void *compiler2026_runtime_alloc(std::size_t size) {
+    void *memory = std::malloc(size);
+    if (memory == nullptr) {
+        throw std::bad_alloc();
     }
-    activeRuntime().submit([=]() { trsm(A, L, X, b, lda); });
+    return memory;
 }
 
-extern "C" void compiler2026_runtime_submit_madd(double *A, double *B, double *C, int b,
-                                                  int lda) {
-    if (b < asyncMinBlockSize()) {
-        madd(A, B, C, b, lda);
-        return;
-    }
-    activeRuntime().submit([=]() { madd(A, B, C, b, lda); });
+extern "C" void compiler2026_runtime_submit(TaskFn fn, void *context) {
+    activeRuntime().submit(fn, context);
 }
 
 extern "C" void compiler2026_runtime_wait() {

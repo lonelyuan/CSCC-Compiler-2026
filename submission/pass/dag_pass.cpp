@@ -1,5 +1,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -7,8 +9,8 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <set>
 #include <string>
@@ -17,11 +19,25 @@
 namespace {
 
 constexpr const char *kBegin = "compiler2026_runtime_begin";
-constexpr const char *kSubmitTrsm = "compiler2026_runtime_submit_trsm";
-constexpr const char *kSubmitMadd = "compiler2026_runtime_submit_madd";
+constexpr const char *kAlloc = "compiler2026_runtime_alloc";
+constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
 constexpr int kAsyncMinBlockSize = 64;
+
+struct RuntimeApi {
+    llvm::FunctionCallee begin;
+    llvm::FunctionCallee alloc;
+    llvm::FunctionCallee submit;
+    llvm::FunctionCallee wait;
+    llvm::FunctionCallee end;
+};
+
+struct TaskIr {
+    llvm::StructType *context_ty;
+    llvm::Function *trsm_task;
+    llvm::Function *madd_task;
+};
 
 bool isBlockCholesky(llvm::Function &function) {
     if (function.isDeclaration()) {
@@ -46,23 +62,18 @@ llvm::FunctionCallee declareVoidRuntime(llvm::Module &module, const char *name,
     return module.getOrInsertFunction(name, fn_ty);
 }
 
-struct RuntimeApi {
-    llvm::FunctionCallee begin;
-    llvm::FunctionCallee submit_trsm;
-    llvm::FunctionCallee submit_madd;
-    llvm::FunctionCallee wait;
-    llvm::FunctionCallee end;
-};
-
 RuntimeApi getRuntimeApi(llvm::Module &module) {
     llvm::LLVMContext &context = module.getContext();
     llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
     llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *size_ty = llvm::IntegerType::get(context, module.getDataLayout().getPointerSizeInBits());
+
+    llvm::FunctionType *alloc_ty = llvm::FunctionType::get(ptr_ty, {size_ty}, false);
 
     return {
         declareVoidRuntime(module, kBegin, {int32_ty, int32_ty}),
-        declareVoidRuntime(module, kSubmitTrsm, {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}),
-        declareVoidRuntime(module, kSubmitMadd, {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}),
+        module.getOrInsertFunction(kAlloc, alloc_ty),
+        declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kWait, {}),
         declareVoidRuntime(module, kEnd, {}),
     };
@@ -74,6 +85,69 @@ llvm::StringRef getCalledName(llvm::CallBase &call) {
         return {};
     }
     return callee->getName();
+}
+
+llvm::Value *fieldPtr(llvm::IRBuilder<> &builder, llvm::StructType *context_ty,
+                      llvm::Value *context, unsigned index) {
+    llvm::Value *zero = builder.getInt32(0);
+    llvm::Value *field = builder.getInt32(index);
+    return builder.CreateInBoundsGEP(context_ty, context, {zero, field});
+}
+
+void buildOperatorTaskBody(llvm::Module &module, llvm::StructType *context_ty,
+                           llvm::Function *task_fn, llvm::FunctionCallee operator_fn) {
+    llvm::LLVMContext &context = module.getContext();
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", task_fn);
+    llvm::IRBuilder<> builder(entry);
+
+    llvm::Argument *context_arg = task_fn->arg_begin();
+    llvm::Value *arg0 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 0));
+    llvm::Value *arg1 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 1));
+    llvm::Value *arg2 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 2));
+    llvm::Value *arg3 = builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 3));
+    llvm::Value *arg4 = builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 4));
+
+    builder.CreateCall(operator_fn, {arg0, arg1, arg2, arg3, arg4});
+    builder.CreateRetVoid();
+}
+
+TaskIr getTaskIr(llvm::Module &module) {
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+
+    llvm::StructType *context_ty = llvm::StructType::getTypeByName(context, "compiler2026.operator_context");
+    if (context_ty == nullptr) {
+        context_ty = llvm::StructType::create(context, "compiler2026.operator_context");
+        context_ty->setBody({ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty});
+    }
+
+    llvm::FunctionType *task_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {ptr_ty}, false);
+    llvm::Function *trsm_task = module.getFunction("compiler2026_task_trsm");
+    if (trsm_task == nullptr) {
+        trsm_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
+                                           "compiler2026_task_trsm", module);
+        trsm_task->addFnAttr("compiler2026.skip");
+        llvm::FunctionCallee trsm =
+            module.getOrInsertFunction("trsm", llvm::FunctionType::get(
+                                                   llvm::Type::getVoidTy(context),
+                                                   {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false));
+        buildOperatorTaskBody(module, context_ty, trsm_task, trsm);
+    }
+
+    llvm::Function *madd_task = module.getFunction("compiler2026_task_madd");
+    if (madd_task == nullptr) {
+        madd_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
+                                           "compiler2026_task_madd", module);
+        madd_task->addFnAttr("compiler2026.skip");
+        llvm::FunctionCallee madd =
+            module.getOrInsertFunction("madd", llvm::FunctionType::get(
+                                                   llvm::Type::getVoidTy(context),
+                                                   {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false));
+        buildOperatorTaskBody(module, context_ty, madd_task, madd);
+    }
+
+    return {context_ty, trsm_task, madd_task};
 }
 
 void addLoopExitWaits(llvm::Loop *loop, llvm::FunctionCallee wait,
@@ -146,6 +220,25 @@ llvm::BasicBlock *insertSerialFallbackGuard(llvm::Function &function,
     return optimized_block;
 }
 
+void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime,
+                                       TaskIr &task_ir, llvm::Function *task_fn) {
+    llvm::Module *module = call->getModule();
+    llvm::IRBuilder<> builder(call);
+    const llvm::DataLayout &layout = module->getDataLayout();
+    const uint64_t context_size = layout.getTypeAllocSize(task_ir.context_ty).getFixedValue();
+    llvm::Type *size_ty = llvm::IntegerType::get(module->getContext(), layout.getPointerSizeInBits());
+
+    llvm::Value *context = builder.CreateCall(
+        runtime.alloc, {llvm::ConstantInt::get(size_ty, context_size)});
+
+    for (unsigned i = 0; i < 5; ++i) {
+        builder.CreateStore(call->getArgOperand(i), fieldPtr(builder, task_ir.context_ty, context, i));
+    }
+
+    builder.CreateCall(runtime.submit, {task_fn, context});
+    call->eraseFromParent();
+}
+
 class OperatorDagPass : public llvm::PassInfoMixin<OperatorDagPass> {
 public:
     llvm::PreservedAnalyses run(llvm::Function &function,
@@ -156,6 +249,7 @@ public:
 
         llvm::Module *module = function.getParent();
         RuntimeApi runtime = getRuntimeApi(*module);
+        TaskIr task_ir = getTaskIr(*module);
         llvm::LoopInfo &loop_info = analysis_manager.getResult<llvm::LoopAnalysis>(function);
 
         auto arg = function.arg_begin();
@@ -193,13 +287,7 @@ public:
         for (llvm::CallBase *call : trsm_calls) {
             llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
             addLoopExitWaits(loop, runtime.wait, wait_blocks);
-
-            llvm::IRBuilder<> builder(call);
-            builder.CreateCall(runtime.submit_trsm,
-                               {call->getArgOperand(0), call->getArgOperand(1),
-                                call->getArgOperand(2), call->getArgOperand(3),
-                                call->getArgOperand(4)});
-            call->eraseFromParent();
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
         }
 
         for (llvm::CallBase *call : madd_calls) {
@@ -208,13 +296,7 @@ public:
                                         ? loop->getParentLoop()
                                         : loop;
             addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
-
-            llvm::IRBuilder<> builder(call);
-            builder.CreateCall(runtime.submit_madd,
-                               {call->getArgOperand(0), call->getArgOperand(1),
-                                call->getArgOperand(2), call->getArgOperand(3),
-                                call->getArgOperand(4)});
-            call->eraseFromParent();
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
         }
 
         for (llvm::BasicBlock &block : function) {
@@ -241,7 +323,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     return {
         LLVM_PLUGIN_API_VERSION,
         "contestant-pass",
-        "0.2",
+        "0.3",
         [](llvm::PassBuilder &pass_builder) {
             pass_builder.registerPipelineParsingCallback(
                 [](llvm::StringRef name, llvm::ModulePassManager &module_pass_manager,

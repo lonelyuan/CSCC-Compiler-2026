@@ -1,0 +1,13 @@
+label,suite,repeat,threads,serial_seconds,contestant_seconds,speedup
+ir_outlined_task_pass,n512_576,1,4,0.085981949,0.079043739,1.087777
+ir_outlined_task_pass,n512_576,2,4,0.086453973,0.080748557,1.070657
+ir_outlined_task_pass,n512_576,3,4,0.087091519,0.080923654,1.076218
+ir_outlined_task_pass,n768,1,4,0.223453369,0.150935585,1.480455
+ir_outlined_task_pass,n768,2,4,0.223239817,0.152223315,1.466528
+ir_outlined_task_pass,n768,3,4,0.228837890,0.150379512,1.521736
+ir_outlined_task_pass,n1024,1,4,0.302581567,0.196294380,1.541468
+ir_outlined_task_pass,n1024,2,4,0.304457057,0.196186679,1.551874
+ir_outlined_task_pass,n1024,3,4,0.308020886,0.194909466,1.580328
+ir_outlined_task_pass,n1152_small_b,1,4,0.358590462,0.360418372,0.994928
+ir_outlined_task_pass,n1152_small_b,2,4,0.357998776,0.364675586,0.981691
+ir_outlined_task_pass,n1152_small_b,3,4,0.356656787,0.363743145,0.980518

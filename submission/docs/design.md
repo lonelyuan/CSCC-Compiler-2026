@@ -56,16 +56,32 @@ fallback 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 在 optimized path 中：
 
 - `cholesky(...)` 保持同步原始调用。
-- `trsm(...)` 替换为：
+- `trsm(...)` 被 outline 到 Pass 生成的 IR task function：
 
-```c
-compiler2026_runtime_submit_trsm(A, L, X, b, lda);
+```llvm
+define internal void @compiler2026_task_trsm(ptr %ctx) {
+  ...
+  call void @trsm(ptr %A, ptr %L, ptr %X, i32 %b, i32 %lda)
+  ret void
+}
 ```
 
-- `madd(...)` 替换为：
+- `madd(...)` 被 outline 到 Pass 生成的 IR task function：
 
-```c
-compiler2026_runtime_submit_madd(A, B, C, b, lda);
+```llvm
+define internal void @compiler2026_task_madd(ptr %ctx) {
+  ...
+  call void @madd(ptr %A, ptr %B, ptr %C, i32 %b, i32 %lda)
+  ret void
+}
+```
+
+- 原始 call site 分配参数上下文并提交 task function：
+
+```llvm
+%ctx = call ptr @compiler2026_runtime_alloc(...)
+...
+call void @compiler2026_runtime_submit(ptr @compiler2026_task_trsm, ptr %ctx)
 ```
 
 Pass 根据 `LoopInfo` 插入同步：
@@ -79,7 +95,7 @@ Pass 根据 `LoopInfo` 插入同步：
 
 ```bash
 llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
-  | grep -n "compiler2026_runtime_\\|compiler2026_serial_fallback\\|call.*trsm\\|call.*madd\\|define.*block_cholesky"
+  | grep -n "compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky\\|compiler2026_serial_fallback"
 ```
 
 已验证 IR 片段包含：
@@ -87,11 +103,14 @@ llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
 ```text
 define dso_local noundef i32 @_ZN7contest14block_choleskyEPKdPdii(...)
   call i32 @compiler2026_serial_fallback(...)
-  call void @compiler2026_runtime_begin(...)
-  call void @compiler2026_runtime_wait()
-  call void @compiler2026_runtime_submit_trsm(...)
-  call void @compiler2026_runtime_submit_madd(...)
-  call void @compiler2026_runtime_end()
+  call void @compiler2026_runtime_submit(ptr @compiler2026_task_trsm, ptr ...)
+  call void @compiler2026_runtime_submit(ptr @compiler2026_task_madd, ptr ...)
+
+define internal void @compiler2026_task_trsm(ptr ...)
+  call void @trsm(...)
+
+define internal void @compiler2026_task_madd(ptr ...)
+  call void @madd(...)
 
 define internal noundef i32 @compiler2026_serial_fallback(...)
   tail call void @trsm(...)
@@ -110,27 +129,21 @@ Runtime API：
 
 ```c
 extern "C" void compiler2026_runtime_begin(int n, int b);
-extern "C" void compiler2026_runtime_submit_trsm(double *A, double *L, double *X, int b, int lda);
-extern "C" void compiler2026_runtime_submit_madd(double *A, double *B, double *C, int b, int lda);
+extern "C" void *compiler2026_runtime_alloc(std::size_t size);
+extern "C" void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
 extern "C" void compiler2026_runtime_wait();
 extern "C" void compiler2026_runtime_end();
 ```
 
 Runtime 内部维护一个 thread-local `AsyncRuntime`：
 
-- `submit_trsm` / `submit_madd` 将算子调用封装为任务放入队列。
-- worker 线程从队列中取任务并调用官方算子 ABI。
+- `runtime_alloc` 为 Pass 生成的 task context 分配内存。
+- `runtime_submit` 只接收 task function 指针和 context 指针。
+- worker 线程从队列中取任务，调用 Pass 生成的 task function，并释放 context。
 - `wait` 等待队列为空且所有运行中任务完成。
 - `end` 做最终等待并释放运行时上下文。
 
-Runtime 只调用官方 ABI：
-
-```c
-void trsm(double *A, double *L, double *X, int b, int lda);
-void madd(double *A, double *B, double *C, int b, int lda);
-```
-
-`cholesky` 由优化后的 IR 保持原始同步调用，因此无需 runtime 包装。
+Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
 
 ## 正确性保证
 
@@ -168,8 +181,7 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=ir_loop_pass_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 详细性能记录见 `docs/performance.md`。
-
