@@ -183,6 +183,7 @@ public:
             ++pending_dag_tasks_;
             if (profiling) {
                 ++profile_dag_nodes_;
+                max_dag_live_ = std::max(max_dag_live_, pending_dag_tasks_);
             }
 
             const int deps[] = {dep_a, dep_b};
@@ -542,6 +543,7 @@ private:
         profile_dag_released_ = 0;
         max_dag_pending_ = 0;
         max_dag_successors_ = 0;
+        max_dag_live_ = 0;
         max_dequeue_batch_ = 0;
         max_ready_tasks_ = 0;
         task_profile_count_ = 0;
@@ -560,7 +562,7 @@ private:
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
                      "dag_nodes=%llu dag_edges=%llu dag_initial_ready=%llu "
                      "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
-                     "queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
+                     "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
                      "main_wait_ms=%.3f\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
@@ -573,7 +575,7 @@ private:
                      static_cast<unsigned long long>(profile_dag_edges_),
                      static_cast<unsigned long long>(profile_dag_initial_ready_),
                      static_cast<unsigned long long>(profile_dag_released_),
-                     max_dag_pending_, max_dag_successors_,
+                     max_dag_pending_, max_dag_successors_, max_dag_live_,
                      static_cast<double>(total_queue_ns_) / 1000000.0,
                      static_cast<double>(total_exec_ns_) / 1000000.0,
                      static_cast<double>(worker_idle_ns_) / 1000000.0,
@@ -631,6 +633,7 @@ private:
     std::size_t max_ready_tasks_ = 0;
     std::size_t max_dag_pending_ = 0;
     std::size_t max_dag_successors_ = 0;
+    std::size_t max_dag_live_ = 0;
     std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
     std::size_t task_profile_count_ = 0;
 };

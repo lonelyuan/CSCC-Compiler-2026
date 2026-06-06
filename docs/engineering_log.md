@@ -362,3 +362,27 @@
 - `LABEL=main_wait_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/main_wait_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.972876s contestant_total=0.648549s speedup_avg=1.567x speedup_geo=1.546x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5650.2`、`max_dag_successors=35`、`main_wait_ms_avg=1.481`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 DAG live-pressure profile
+
+改动：
+
+- runtime profile 新增 `max_dag_live`，记录一次 `block_cholesky` 调用中未完成 DAG 节点数的峰值。
+- benchmark CSV 新增 `max_dag_live` 字段，并在 profile summary 中输出该字段的最大值。
+- 归档 `dag_live_profile_smoke.csv`，确认该字段从 runtime stderr 到 CSV 和 summary 全链路可用。
+
+经验：
+
+- `dag_nodes` 是总提交量，`max_dag_live` 是同一时刻未完成 DAG 节点压力。后续跨 panel DAG 如果放宽 panel barrier，live 节点峰值会比 panel-local 模型更关键。
+- `max_dag_live` 只描述调度结构压力，不是性能结论。需要和 `queue_ms`、`main_wait_ms`、`worker_idle_ms`、fanout 和 verifier 一起判断是否值得扩大 DAG 作用域。
+- 该指标只在 `COMPILER2026_DAG_PROFILE=1` 下维护，默认运行路径不增加统计更新。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.892x`。
+- `LABEL=dag_live_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_live_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.957114s contestant_total=0.643849s speedup_avg=1.523x speedup_geo=1.498x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=4929.0`、`max_dag_successors=35`、`max_dag_live=472`、`main_wait_ms_avg=1.613`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
