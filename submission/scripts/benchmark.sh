@@ -11,6 +11,7 @@ CXX_BIN="${CXX:-/opt/bisheng/bin/clang++}"
 CLANG_BIN="${CLANG:-/opt/bisheng/bin/clang++}"
 OPT_BIN="${OPT:-/opt/bisheng/bin/opt}"
 LLVM_LINK_BIN="${LLVM_LINK:-/opt/bisheng/bin/llvm-link}"
+LLVM_DIS_BIN="${LLVM_DIS:-/opt/bisheng/bin/llvm-dis}"
 THREADS="${COMPILER2026_DAG_THREADS:-4}"
 PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
 TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
@@ -58,6 +59,12 @@ cd "${SDK_DIR}"
   "${BENCH_DIR}/ir/app.bc" \
   -o "${BENCH_DIR}/ir/app.opt.bc"
 
+"${LLVM_DIS_BIN}" "${BENCH_DIR}/ir/app.opt.bc" -o "${BENCH_DIR}/ir/app.opt.ll"
+IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_SUBMIT_PLAIN=$(grep -Ec "call void @compiler2026_runtime_submit\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_TRSM_CALLS=$(grep -Ec "call .*@trsm\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+
 "${CXX_BIN}" -std=c++17 -O2 -pthread \
   -Iinclude -Isrc/base_kernels \
   "${BENCH_DIR}/ir/app.opt.bc" \
@@ -67,7 +74,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -109,6 +116,7 @@ run_suite() {
 
     python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${TASK_BATCH}" \
       "${ASYNC_MIN_B}" "${PROFILE}" \
+      "${IR_SUBMIT_DEPS}" "${IR_SUBMIT_PLAIN}" "${IR_TRSM_CALLS}" "${IR_MADD_CALLS}" \
       "${suite_dir}/serial_${run}.time" \
       "${suite_dir}/contestant_${run}.time" \
       "${suite_dir}/contestant_${run}.profile" >> "${CSV}" <<'PY'
@@ -124,6 +132,10 @@ import sys
     task_batch,
     async_min_b,
     profile_enabled,
+    ir_submit_deps,
+    ir_submit_plain,
+    ir_trsm_calls,
+    ir_madd_calls,
     serial_path,
     contestant_path,
     profile_path,
@@ -211,6 +223,10 @@ writer.writerow([
     task_batch,
     async_min_b,
     "1" if profile_enabled not in ("", "0") else "0",
+    ir_submit_deps,
+    ir_submit_plain,
+    ir_trsm_calls,
+    ir_madd_calls,
     async_decisions,
     async_enabled,
     async_disabled,
@@ -268,6 +284,14 @@ for suite in sorted({r["suite"] for r in rows}):
         f"speedup_avg={statistics.mean(vals):.3f}x"
     )
 if rows:
+    first = rows[0]
+    print(
+        "ir: "
+        f"submit_deps={first['ir_submit_deps']} "
+        f"submit_plain={first['ir_submit_plain']} "
+        f"trsm_calls={first['ir_trsm_calls']} "
+        f"madd_calls={first['ir_madd_calls']}"
+    )
     speedups = [float(r["speedup"]) for r in rows]
     serial_total = sum(float(r["serial_seconds"]) for r in rows)
     contestant_total = sum(float(r["contestant_seconds"]) for r in rows)

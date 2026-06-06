@@ -248,3 +248,24 @@
 - 优化后 IR 包含 `compiler2026_runtime_submit_deps`，`compiler2026_task_trsm` 仍直接调用 `@trsm`，`compiler2026_task_madd` 仍直接调用 `@madd`。
 - `LABEL=gep_operator_key_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/gep_operator_key_smoke.csv`；summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5866.8`、`max_dag_successors=35`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 benchmark IR submit counters
+
+改动：
+
+- benchmark 在 `opt` 后反汇编 `app.opt.bc`，统计 `ir_submit_deps`、`ir_submit_plain`、`ir_trsm_calls`、`ir_madd_calls`。
+- 这些静态 IR call site 计数写入 CSV，并在 benchmark summary 中输出一次。
+- 归档 `ir_submit_counts_smoke.csv`，用于证明 Pass 当前仍走 dependency-aware submit 路径。
+
+经验：
+
+- 动态 DAG profile 只能说明运行时实际执行了多少 task；如果 Pass key 恢复回退，最好能从同一份 CSV 直接看到 IR 里普通 submit 是否重新出现。
+- 静态 IR 计数和动态 profile 是互补证据：`ir_submit_deps=2` 说明编译后保留依赖提交 call site，`dag_nodes/dag_edges` 说明运行时确实构建 DAG。
+- 本轮第一次 benchmark 失败是 VM 根分区被旧 `build/optimization_benchmarks` 输出占满，baseline 写结果失败；清理生成目录后重跑通过。后续遇到 `Failed to write result payload` 应先检查 `df -h` 和 benchmark 输出目录大小。
+
+验证：
+
+- `bash -n submission/scripts/benchmark.sh` 通过。
+- `LABEL=ir_submit_counts_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 清理旧 benchmark 输出后通过，归档为 `docs/benchmark_results/ir_submit_counts_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，同时保留 overall、async decision 和 DAG profile summary。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
