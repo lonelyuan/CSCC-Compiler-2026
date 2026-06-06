@@ -195,6 +195,9 @@ public:
 
                 auto producer = latest_producer_.find(dep);
                 if (producer == latest_producer_.end()) {
+                    if (profiling) {
+                        ++profile_dag_missing_deps_;
+                    }
                     continue;
                 }
 
@@ -207,6 +210,8 @@ public:
                         max_dag_successors_ =
                             std::max(max_dag_successors_, producer_node.successors.size());
                     }
+                } else if (profiling) {
+                    ++profile_dag_satisfied_deps_;
                 }
             }
 
@@ -539,6 +544,8 @@ private:
         dequeue_batches_ = 0;
         profile_dag_nodes_ = 0;
         profile_dag_edges_ = 0;
+        profile_dag_satisfied_deps_ = 0;
+        profile_dag_missing_deps_ = 0;
         profile_dag_initial_ready_ = 0;
         profile_dag_released_ = 0;
         max_dag_pending_ = 0;
@@ -560,7 +567,8 @@ private:
                      "[compiler2026_profile] n=%d b=%d threads=%zu workers=%zu "
                      "batch=%zu tasks=%llu main_tasks=%llu worker_tasks=%llu "
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
-                     "dag_nodes=%llu dag_edges=%llu dag_initial_ready=%llu "
+                     "dag_nodes=%llu dag_edges=%llu dag_satisfied_deps=%llu "
+                     "dag_missing_deps=%llu dag_initial_ready=%llu "
                      "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
                      "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
                      "main_wait_ms=%.3f\n",
@@ -573,6 +581,8 @@ private:
                      max_dequeue_batch_, max_ready_tasks_,
                      static_cast<unsigned long long>(profile_dag_nodes_),
                      static_cast<unsigned long long>(profile_dag_edges_),
+                     static_cast<unsigned long long>(profile_dag_satisfied_deps_),
+                     static_cast<unsigned long long>(profile_dag_missing_deps_),
                      static_cast<unsigned long long>(profile_dag_initial_ready_),
                      static_cast<unsigned long long>(profile_dag_released_),
                      max_dag_pending_, max_dag_successors_, max_dag_live_,
@@ -627,6 +637,8 @@ private:
     std::uint64_t dequeue_batches_ = 0;
     std::uint64_t profile_dag_nodes_ = 0;
     std::uint64_t profile_dag_edges_ = 0;
+    std::uint64_t profile_dag_satisfied_deps_ = 0;
+    std::uint64_t profile_dag_missing_deps_ = 0;
     std::uint64_t profile_dag_initial_ready_ = 0;
     std::uint64_t profile_dag_released_ = 0;
     std::size_t max_dequeue_batch_ = 0;

@@ -386,3 +386,27 @@
 - `LABEL=dag_live_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_live_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.957114s contestant_total=0.643849s speedup_avg=1.523x speedup_geo=1.498x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=4929.0`、`max_dag_successors=35`、`max_dag_live=472`、`main_wait_ms_avg=1.613`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 DAG dependency state profile
+
+改动：
+
+- runtime profile 新增 `dag_satisfied_deps` 和 `dag_missing_deps`，分别记录提交 consumer 时 producer 已完成的依赖，以及没有找到 latest producer 的依赖。
+- `dag_edges` 保持原语义：只统计提交时仍未完成、需要挂 successor 的 pending dependency edge。
+- benchmark CSV 新增两列，并在 profile summary 中输出平均已满足依赖和缺失依赖总数。
+
+经验：
+
+- 只看 `dag_edges` 会低估 Pass 恢复出的逻辑依赖数量，因为部分 producer 可能在 consumer 提交前已经完成。`dag_satisfied_deps` 能补上这部分信息。
+- `dag_missing_deps=0` 是一个有用 smoke 信号：说明当前公开 IR 下 `madd` 的两个输入 key 都能在 latest-producer 表中找到对应 `trsm` producer。它不能证明完整 block-coordinate 分析已经完成，但能快速发现 key 恢复或 producer 生命周期回退。
+- 这组计数只解释依赖状态，不改变调度策略；跨 panel DAG 前应继续保留 correctness smoke 和 IR submit 计数交叉验证。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.850x`。
+- `LABEL=dag_dep_state_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_dep_state_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.970238s contestant_total=0.638944s speedup_avg=1.549x speedup_geo=1.518x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5562.2`、`dag_satisfied_deps_avg=6397.8`、`dag_missing_deps=0`、`max_dag_live=544`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
