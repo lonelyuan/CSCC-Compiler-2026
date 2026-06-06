@@ -25,9 +25,9 @@ constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
 constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
+constexpr const char *kShouldAsync = "compiler2026_runtime_should_async";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
-constexpr int kAsyncMinBlockSize = 32;
 
 struct RuntimeApi {
     llvm::FunctionCallee begin;
@@ -35,6 +35,7 @@ struct RuntimeApi {
     llvm::FunctionCallee submit;
     llvm::FunctionCallee submit_deps;
     llvm::FunctionCallee register_task;
+    llvm::FunctionCallee should_async;
     llvm::FunctionCallee wait;
     llvm::FunctionCallee end;
 };
@@ -83,6 +84,8 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kRegisterTask, {ptr_ty, ptr_ty}),
+        module.getOrInsertFunction(kShouldAsync,
+                                   llvm::FunctionType::get(int32_ty, {int32_ty, int32_ty}, false)),
         declareVoidRuntime(module, kWait, {}),
         declareVoidRuntime(module, kEnd, {}),
     };
@@ -202,7 +205,8 @@ llvm::Function *cloneForAsync(llvm::Function &function) {
     return async_fn;
 }
 
-void insertAsyncDispatch(llvm::Function &function, llvm::Function *async_fn, llvm::Value *b) {
+void insertAsyncDispatch(llvm::Function &function, llvm::Function *async_fn,
+                         llvm::FunctionCallee should_async, llvm::Value *n, llvm::Value *b) {
     llvm::LLVMContext &context = function.getContext();
     llvm::BasicBlock &entry = function.getEntryBlock();
     llvm::Instruction *split_point = &*entry.getFirstInsertionPt();
@@ -215,8 +219,9 @@ void insertAsyncDispatch(llvm::Function &function, llvm::Function *async_fn, llv
         llvm::BasicBlock::Create(context, "compiler2026.async", &function, serial_block);
 
     llvm::IRBuilder<> entry_builder(&entry);
-    llvm::Value *use_async = entry_builder.CreateICmpSGE(
-        b, llvm::ConstantInt::get(b->getType(), kAsyncMinBlockSize));
+    llvm::Value *decision = entry_builder.CreateCall(should_async, {n, b});
+    llvm::Value *use_async =
+        entry_builder.CreateICmpNE(decision, llvm::ConstantInt::get(decision->getType(), 0));
     entry_builder.CreateCondBr(use_async, async_block, serial_block);
 
     llvm::IRBuilder<> async_builder(async_block);
@@ -389,12 +394,12 @@ public:
         auto arg = function.arg_begin();
         (void)&*arg++;
         (void)&*arg++;
-        (void)&*arg++;
+        llvm::Value *n = &*arg++;
         llvm::Value *b = &*arg++;
 
         llvm::Function *async_fn = cloneForAsync(function);
         transformAsyncFunction(*async_fn, runtime, task_ir);
-        insertAsyncDispatch(function, async_fn, b);
+        insertAsyncDispatch(function, async_fn, runtime.should_async, n, b);
 
         return llvm::PreservedAnalyses::none();
     }

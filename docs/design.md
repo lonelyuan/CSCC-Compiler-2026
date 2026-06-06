@@ -40,14 +40,16 @@ Pass 使用 `LoopAnalysis` 获取 `LoopInfo`，只处理官方 `contest::block_c
 compiler2026_async_impl(A, L, n, b)
 ```
 
-Pass 从官方 `block_cholesky` 克隆出 async 版本，只在 async clone 中改写 `trsm/madd` call site；原始 `block_cholesky` 函数体保留为串行路径。入口分支为：
+Pass 从官方 `block_cholesky` 克隆出 async 版本，只在 async clone 中改写 `trsm/madd` call site；原始 `block_cholesky` 函数体保留为串行路径。入口分支调用 runtime predicate：
 
 ```text
-if (b >= 32)
+if (compiler2026_runtime_should_async(n, b))
     return compiler2026_async_impl(A, L, n, b);
 else
     run original serial IR path;
 ```
+
+默认 predicate 仍使用 `b >= 32` 且 block 数大于 1；`COMPILER2026_ASYNC_MIN_B` 可以覆盖阈值，用于 profile/benchmark 调参。
 
 async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
@@ -96,13 +98,14 @@ Pass 根据 `LoopInfo` 插入同步：
 
 ```bash
 llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
-  | grep -n "compiler2026_async_impl\\|compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky"
+  | grep -n "compiler2026_runtime_should_async\\|compiler2026_async_impl\\|compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky"
 ```
 
 已验证 IR 片段包含：
 
 ```text
 define dso_local noundef i32 @_ZN7contest14block_choleskyEPKdPdii(...)
+  call i32 @compiler2026_runtime_should_async(...)
   call i32 @compiler2026_async_impl(...)
 
 define internal noundef i32 @compiler2026_async_impl(...)
@@ -128,6 +131,7 @@ Runtime API：
 
 ```c
 extern "C" void compiler2026_runtime_begin(int n, int b);
+extern "C" int compiler2026_runtime_should_async(int n, int b);
 extern "C" void compiler2026_runtime_register_task(void (*fn)(void *), const char *name);
 extern "C" void *compiler2026_runtime_alloc(std::size_t size);
 extern "C" void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
@@ -139,6 +143,7 @@ extern "C" void compiler2026_runtime_end();
 
 Runtime 内部维护一个 thread-local `AsyncRuntime`：
 
+- `runtime_should_async` 集中管理 async path 入口阈值，使 Pass 入口分支、runtime 线程选择和 benchmark 记录的 `async_min_b` 保持一致。
 - `runtime_alloc` 为 Pass 生成的 task context 分配内存。
 - `runtime_submit` 只接收 task function 指针和 context 指针。
 - `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。
@@ -175,7 +180,7 @@ Pass 和 runtime 当前共同保证：
 
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
 - block key 恢复依赖当前 baseline 的直接 GEP 形态；如果后续 IR 形态变化，Pass 会回退到原 submit/wait 路径。
-- 当前异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`b >= 16` 实验触发过段错误，已回退。
+- 当前默认异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B` 可用于实验覆盖，`b >= 16` 实验触发过段错误，已回退。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 

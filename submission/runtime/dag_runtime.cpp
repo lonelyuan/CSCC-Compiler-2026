@@ -718,6 +718,14 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
     runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads);
 }
 
+extern "C" int compiler2026_runtime_should_async(int n, int b) {
+    if (n <= 0 || b <= 0 || b < asyncMinBlockSize()) {
+        return 0;
+    }
+
+    return (n / b > 1) ? 1 : 0;
+}
+
 extern "C" void compiler2026_runtime_register_task(TaskFn fn, const char *name) {
     activeRuntime().registerTask(fn, name);
 }
