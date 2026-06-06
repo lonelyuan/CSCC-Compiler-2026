@@ -174,6 +174,9 @@ public:
             const int node_index = static_cast<int>(dag_nodes_.size());
             dag_nodes_.push_back({fn, context, 0, false, {}});
             ++pending_dag_tasks_;
+            if (profiling) {
+                ++profile_dag_nodes_;
+            }
 
             const int deps[] = {dep_a, dep_b};
             for (int i = 0; i < 2; ++i) {
@@ -191,7 +194,16 @@ public:
                 if (!producer_node.completed) {
                     producer_node.successors.push_back(node_index);
                     ++dag_nodes_[node_index].pending;
+                    if (profiling) {
+                        ++profile_dag_edges_;
+                    }
                 }
+            }
+
+            if (profiling) {
+                max_dag_pending_ =
+                    std::max(max_dag_pending_,
+                             static_cast<std::size_t>(dag_nodes_[node_index].pending));
             }
 
             if (output >= 0) {
@@ -200,6 +212,9 @@ public:
 
             if (dag_nodes_[node_index].pending == 0) {
                 enqueueTaskLocked({fn, context, profiling ? nowNs() : 0, node_index});
+                if (profiling) {
+                    ++profile_dag_initial_ready_;
+                }
                 should_notify = (tasks_.size() - task_head_) <= workers_.size();
             }
         }
@@ -391,6 +406,9 @@ private:
                     enqueueTaskLocked({successor.fn, successor.context,
                                        profile_enabled_.load(std::memory_order_relaxed) ? nowNs() : 0,
                                        successor_index});
+                    if (profile_enabled_.load(std::memory_order_relaxed)) {
+                        ++profile_dag_released_;
+                    }
                     released = true;
                 }
             }
@@ -496,6 +514,11 @@ private:
         worker_idle_ns_ = 0;
         submit_flushes_ = 0;
         dequeue_batches_ = 0;
+        profile_dag_nodes_ = 0;
+        profile_dag_edges_ = 0;
+        profile_dag_initial_ready_ = 0;
+        profile_dag_released_ = 0;
+        max_dag_pending_ = 0;
         max_dequeue_batch_ = 0;
         max_ready_tasks_ = 0;
         task_profile_count_ = 0;
@@ -512,6 +535,8 @@ private:
                      "[compiler2026_profile] n=%d b=%d threads=%zu workers=%zu "
                      "batch=%zu tasks=%llu main_tasks=%llu worker_tasks=%llu "
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
+                     "dag_nodes=%llu dag_edges=%llu dag_initial_ready=%llu "
+                     "dag_released=%llu max_dag_pending=%zu "
                      "queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
@@ -520,6 +545,11 @@ private:
                      static_cast<unsigned long long>(submit_flushes_),
                      static_cast<unsigned long long>(dequeue_batches_),
                      max_dequeue_batch_, max_ready_tasks_,
+                     static_cast<unsigned long long>(profile_dag_nodes_),
+                     static_cast<unsigned long long>(profile_dag_edges_),
+                     static_cast<unsigned long long>(profile_dag_initial_ready_),
+                     static_cast<unsigned long long>(profile_dag_released_),
+                     max_dag_pending_,
                      static_cast<double>(total_queue_ns_) / 1000000.0,
                      static_cast<double>(total_exec_ns_) / 1000000.0,
                      static_cast<double>(worker_idle_ns_) / 1000000.0);
@@ -567,8 +597,13 @@ private:
     std::uint64_t worker_idle_ns_ = 0;
     std::uint64_t submit_flushes_ = 0;
     std::uint64_t dequeue_batches_ = 0;
+    std::uint64_t profile_dag_nodes_ = 0;
+    std::uint64_t profile_dag_edges_ = 0;
+    std::uint64_t profile_dag_initial_ready_ = 0;
+    std::uint64_t profile_dag_released_ = 0;
     std::size_t max_dequeue_batch_ = 0;
     std::size_t max_ready_tasks_ = 0;
+    std::size_t max_dag_pending_ = 0;
     std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
     std::size_t task_profile_count_ = 0;
 };

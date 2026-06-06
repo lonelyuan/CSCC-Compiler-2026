@@ -1,0 +1,5 @@
+label,suite,repeat,threads,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms
+dag_profile_counters_smoke,n512_576,1,4,1,0.086992829,0.069515152,1.251423,6,2852,580,2272,0,1017,16,104,2852,2754,1092,1760,2,173.460,42.805,12.470,428,12.043,11.767,2424,161.417,31.039
+dag_profile_counters_smoke,n768,1,4,1,0.224967597,0.126399539,1.779813,7,3913,849,3064,0,1176,16,212,3913,4004,1469,2444,2,541.980,165.609,35.740,514,19.483,40.414,3399,522.498,125.195
+dag_profile_counters_smoke,n1024,1,4,1,0.306654579,0.165160987,1.856701,4,6880,1448,5432,0,1269,16,399,6880,5533,3391,3489,2,1739.693,234.186,47.594,650,31.406,51.602,6230,1708.288,182.583
+dag_profile_counters_smoke,n1152_small_b,1,4,1,0.362951570,0.289920842,1.251899,2,14352,3011,11341,0,2209,16,498,14352,11746,6692,7660,2,3732.386,94.809,16.158,1126,48.479,8.845,13226,3683.907,85.964

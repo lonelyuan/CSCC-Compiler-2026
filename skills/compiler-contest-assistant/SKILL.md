@@ -151,7 +151,7 @@ Near-term improvements:
 - Strengthen block-coordinate recovery beyond the current direct GEP-offset key.
 - Extend explicit dependencies across panel boundaries for `cholesky(panel+1)` and `trsm(row,panel+1)`.
 - Replace the remaining panel-end wait with ready-queue DAG scheduling where safe.
-- Add DAG profiling counters for dependency edges, ready releases, queue depth, and critical-path symptoms.
+- Use existing DAG profiling counters for dependency edges, ready releases, queue depth, and critical-path symptoms to guide the next scheduler changes.
 - Make task granularity adaptive to `n`, `b`, block count, and thread count.
 
 Long-term improvements:

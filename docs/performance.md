@@ -61,7 +61,7 @@ cd /root/bisheng
 COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
-新增 CSV 字段包括 `profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
+新增 CSV 字段包括 `profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`dag_nodes`、`dag_edges`、`dag_initial_ready`、`dag_released`、`max_dag_pending`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
 
 示例输出节选：
 
@@ -105,10 +105,11 @@ docs/benchmark_results/runtime_submit_dequeue_batch.csv
 docs/benchmark_results/runtime_ready_queue_trsm_deps.csv
 docs/benchmark_results/profile_csv_smoke.csv
 docs/benchmark_results/ready_queue_profile_csv_smoke.csv
+docs/benchmark_results/dag_profile_counters_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段和聚合逻辑，不作为正式性能均值。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv` 和 `dag_profile_counters_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段和聚合逻辑，不作为正式性能均值。
 
 ## 结论
 
