@@ -15,8 +15,7 @@
 │   ├── optimization_principles.md
 │   ├── performance.md
 │   ├── roadmap.md
-│   ├── benchmark_results/
-│   └── 2026年全国大学生计算机系统能力大赛...技术方案.pdf
+│   └── benchmark_results/
 ├── submission/
 │   ├── CMakeLists.txt
 │   ├── README.md
@@ -50,6 +49,7 @@
 - `docs/performance.md`：性能实验结果和 CSV 路径。
 - `docs/roadmap.md`：面向真实鲲鹏多核平台和决赛扩展数据的长期优化路线。
 - `docs/benchmark_results/`：历史和当前 benchmark 结果。
+- 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
 - `contestant_sdk/`：官方 SDK、baseline、测试工具和公开 case。
 - `scripts/sync_to_vm.sh`：把本地工程同步到 openEuler/BiSheng 虚拟机。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
