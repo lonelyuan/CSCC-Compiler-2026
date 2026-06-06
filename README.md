@@ -33,6 +33,8 @@
 │       └── package.sh
 ├── scripts/
 │   └── sync_to_vm.sh
+├── skills/
+│   └── compiler-contest-assistant/
 ├── contestant_sdk/
 ├── build/
 └── dist/
@@ -52,7 +54,31 @@
 - 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
 - `contestant_sdk/`：官方 SDK、baseline、测试工具和公开 case。
 - `scripts/sync_to_vm.sh`：把本地工程同步到 openEuler/BiSheng 虚拟机。
+- `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
+
+## Codex Skill
+
+本仓库包含一个项目专用 skill：
+
+```text
+skills/compiler-contest-assistant/
+```
+
+协作者可以复制或软链接到自己的 Codex skills 目录：
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$(pwd)/skills/compiler-contest-assistant" ~/.codex/skills/compiler-contest-assistant
+```
+
+之后在 Codex 中显式调用：
+
+```text
+$compiler-contest-assistant 继续优化本项目
+```
+
+该 skill 会提醒 Codex 使用 openEuler/BiSheng VM、遵守比赛规则、不修改 SDK/算子实现、不做虚假优化，并优先从 IR 依赖分析、任务图调度和 runtime 扩展性角度推进项目。
 
 ## 常用命令
 
