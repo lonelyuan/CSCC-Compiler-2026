@@ -1,0 +1,99 @@
+# 后续优化路线
+
+本文记录面向真实鲲鹏 920 多核平台和决赛扩展用例的长期路线。当前代码已经避免整函数替换，转为 IR-level 算子识别、任务化和保守 DAG 同步；后续重点是把 panel barrier 调度升级为更通用的编译器分析与运行时协同优化。
+
+## 平台假设
+
+当前本地 openEuler VM 只分配 4 个 vCPU，不能代表真实测试平台。鲲鹏 920 常见服务器配置是单路 48/64 核或双路更多核心，内存带宽、NUMA、cache 层次、线程调度开销都和本地 VM 差异很大。
+
+本项目后续不应把 `COMPILER2026_DAG_THREADS=4`、`b >= 32` 等参数视为最终常量，而应把它们作为当前调试平台上的经验值。真实平台上需要按核心数、block size、矩阵规模和算子耗时动态决策。
+
+## 更鲁棒的实验设计
+
+后续 benchmark 应覆盖以下维度：
+
+- 核心数：`1, 2, 4, 8, 16, 32, 48, 64`，真实平台上再加入 NUMA 绑定实验。
+- 矩阵规模：公开 `n <= 10000` 范围内分层采样，包括 `n=512/768/1024/2048/4096/8192/10000`。
+- block size：覆盖小块、中块和大块，例如 `8, 16, 24, 32, 48, 64, 96, 128, 192, 256`。
+- 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率、每类算子耗时。
+- 对比组：官方串行、当前 panel-barrier、不同线程数、不同异步阈值、未来 ready-queue DAG。
+
+结论不要只看单点 speedup，应使用几何平均和分层统计，避免对公开样例或 4 核 VM 过拟合。
+
+## Pass 演进方向
+
+### 1. IR 层 block-coordinate 识别
+
+当前 Pass 只识别 `trsm/madd` 调用和 loop exit。下一步应从 GEP、induction variable、`n/b` 等表达式中恢复 block 坐标：
+
+```text
+trsm(row, panel)
+madd(row, col, panel)
+cholesky(panel, panel)
+```
+
+恢复坐标后，Pass 可以生成更精确的依赖边，而不是只在 loop exit 插入全局 barrier。
+
+### 2. Ready-Queue DAG
+
+当前依赖模型：
+
+```text
+cholesky(panel) -> all trsm(panel) -> all madd(panel) -> next panel
+```
+
+更好的模型：
+
+```text
+trsm(r, p) depends on cholesky(p)
+madd(r, c, p) depends on trsm(r, p), trsm(c, p)
+cholesky(p+1) depends only on updates to block (p+1, p+1)
+trsm(r, p+1) depends on updates to block (r, p+1)
+```
+
+这能让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成，是大核数平台上最重要的性能空间。
+
+### 3. 运行时任务粒度自适应
+
+单个 `madd` task 对小 `b` 可能过细，对大 `b` 又足够重。运行时应支持：
+
+- 小 task 合并为 range task。
+- 大 task 保持单算子粒度以提升负载均衡。
+- 根据 `n, b, block_count, thread_count` 自动选择粒度。
+- 收集轻量 profile，为下一次调用选择阈值。
+
+### 4. 多核和 NUMA 亲和性
+
+真实鲲鹏平台上需要测试：
+
+- worker pinning。
+- work stealing 和 per-worker deque。
+- NUMA-aware task placement。
+- 避免单全局队列在 48/64 核上成为瓶颈。
+
+当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。
+
+## 需要调研的方向
+
+优先调研以下关键词和系统：
+
+- Task DAG scheduling for tiled Cholesky factorization。
+- PLASMA / QUARK tiled linear algebra runtime。
+- StarPU heterogeneous runtime and codelet scheduling。
+- PaRSEC dynamic task discovery。
+- OpenMP task dependency `depend(in/out/inout)` lowering。
+- LLVM Polly / MLIR affine dependence analysis。
+- LLVM Tapir / Cilk-style task parallel IR。
+- Work stealing deque, Chase-Lev deque, Cilk runtime scheduling。
+- NUMA-aware task scheduling on ARM servers。
+
+这些方向和本赛题精神一致：不是替换算法，而是在编译器层恢复依赖、生成任务图、选择合理 runtime 执行策略。
+
+## 当前瓶颈
+
+- Panel barrier 过保守，限制大核数可扩展性。
+- Pass 还没有通用恢复数组子块坐标和读写集合。
+- Runtime 仍是单全局队列，扩展到 32 核以上可能出现锁竞争。
+- 阈值仍来自经验测试，需要改成 profile/runtime heuristic。
+
+短期目标是把 `trsm/madd` 的坐标和依赖边从 IR 中恢复出来；中期目标是生成 ready-queue DAG；长期目标是把这个 pass 做成可解释、可迁移的 tiled linear algebra taskization pass。

@@ -18,10 +18,32 @@ cp "${SUBMISSION_DIR}/manifest.json" "${DIST_DIR}/manifest.json"
 cp "${SUBMISSION_DIR}/README.md" "${DIST_DIR}/README.md"
 cp "${SUBMISSION_DIR}/docs/design.md" "${DIST_DIR}/docs/design.md"
 cp "${SUBMISSION_DIR}/docs/performance.md" "${DIST_DIR}/docs/performance.md"
+cp "${SUBMISSION_DIR}/docs/roadmap.md" "${DIST_DIR}/docs/roadmap.md"
 cp -R "${SUBMISSION_DIR}/docs/benchmark_results" "${DIST_DIR}/docs/benchmark_results"
+cp "${SUBMISSION_DIR}/CMakeLists.txt" "${DIST_DIR}/src/CMakeLists.txt"
+cp -R "${SUBMISSION_DIR}/pass" "${DIST_DIR}/src/pass"
+cp -R "${SUBMISSION_DIR}/runtime" "${DIST_DIR}/src/runtime"
+cp -R "${SUBMISSION_DIR}/scripts" "${DIST_DIR}/src/scripts"
 
 tar -C "$(dirname "${DIST_DIR}")" -czf "${REPO_ROOT}/dist/submission.tar.gz" "$(basename "${DIST_DIR}")"
+python3 - "${DIST_DIR}" "${REPO_ROOT}/dist/submission.zip" <<'PY'
+import os
+import sys
+import zipfile
+
+dist_dir, zip_path = sys.argv[1:]
+root = os.path.dirname(dist_dir)
+base = os.path.basename(dist_dir)
+
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for current, _, files in os.walk(dist_dir):
+        for name in files:
+            path = os.path.join(current, name)
+            rel = os.path.relpath(path, root)
+            archive.write(path, rel)
+PY
 
 echo "Packaged:"
 echo "  ${DIST_DIR}"
 echo "  ${REPO_ROOT}/dist/submission.tar.gz"
+echo "  ${REPO_ROOT}/dist/submission.zip"

@@ -40,6 +40,11 @@ cd /root/bisheng
 ./submission/scripts/package.sh
 ```
 
+The package script writes both:
+
+- `dist/submission.tar.gz`
+- `dist/submission.zip`
+
 Current implementation:
 
 - The pass analyzes the official `contest::block_cholesky` IR with LoopInfo.
@@ -51,3 +56,5 @@ Current implementation:
   allocation. Official `trsm` and `madd` ABI calls remain in Pass-generated IR
   task functions.
 - No source annotations are required.
+
+Longer-term scaling notes are documented in `docs/roadmap.md`.
