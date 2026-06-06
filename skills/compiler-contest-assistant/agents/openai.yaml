@@ -1,0 +1,4 @@
+interface:
+  display_name: "编译器比赛小助手"
+  short_description: "毕昇编译赛项目开发与评测指南"
+  default_prompt: "Use $compiler-contest-assistant to continue the Bisheng compiler contest project safely and competitively."
