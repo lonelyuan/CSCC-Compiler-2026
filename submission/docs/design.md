@@ -34,26 +34,26 @@ Pass 使用 `LoopAnalysis` 获取 `LoopInfo`，只处理官方 `contest::block_c
 
 ### IR 版本化
 
-为了避免小 block 场景下任务提交开销超过计算收益，Pass 先克隆一份原始 IR 作为 serial fallback：
+为了避免小 block 场景下任务提交开销超过计算收益，Pass 采用 IR 版本化：
 
 ```text
-compiler2026_serial_fallback(A, L, n, b)
+compiler2026_async_impl(A, L, n, b)
 ```
 
-然后在 `block_cholesky` 入口插入版本化分支：
+Pass 从官方 `block_cholesky` 克隆出 async 版本，只在 async clone 中改写 `trsm/madd` call site；原始 `block_cholesky` 函数体保留为串行路径。入口分支为：
 
 ```text
-if (b < 64)
-    return compiler2026_serial_fallback(A, L, n, b);
+if (b >= 32)
+    return compiler2026_async_impl(A, L, n, b);
 else
-    run optimized IR path;
+    run original serial IR path;
 ```
 
-fallback 是从官方 baseline IR 克隆出来的，不是手写算法替换。
+async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
 ### 算子调用转换
 
-在 optimized path 中：
+在 async path 中：
 
 - `cholesky(...)` 保持同步原始调用。
 - `trsm(...)` 被 outline 到 Pass 生成的 IR task function：
@@ -88,21 +88,23 @@ Pass 根据 `LoopInfo` 插入同步：
 
 - `trsm` 所在 loop 的 exit block 插入 `compiler2026_runtime_wait()`。
 - `madd` 所在内层 loop 的父 loop exit block 插入 `compiler2026_runtime_wait()`，使同一 panel 的 `madd` 任务完成后再进入下一 panel。
-- 函数 optimized path 入口插入 `compiler2026_runtime_begin(n, b)`。
-- optimized path 返回前插入 `compiler2026_runtime_end()`。
+- 函数 async path 入口插入 `compiler2026_runtime_begin(n, b)`。
+- async path 返回前插入 `compiler2026_runtime_end()`。
 
-优化后的 IR 仍保留原始 `block_cholesky` 的循环结构。检查命令：
+优化后的 IR 仍保留原始 `block_cholesky` 的串行循环结构，并额外生成 async clone。检查命令：
 
 ```bash
 llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
-  | grep -n "compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky\\|compiler2026_serial_fallback"
+  | grep -n "compiler2026_async_impl\\|compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky"
 ```
 
 已验证 IR 片段包含：
 
 ```text
 define dso_local noundef i32 @_ZN7contest14block_choleskyEPKdPdii(...)
-  call i32 @compiler2026_serial_fallback(...)
+  call i32 @compiler2026_async_impl(...)
+
+define internal noundef i32 @compiler2026_async_impl(...)
   call void @compiler2026_runtime_submit(ptr @compiler2026_task_trsm, ptr ...)
   call void @compiler2026_runtime_submit(ptr @compiler2026_task_madd, ptr ...)
 
@@ -111,10 +113,6 @@ define internal void @compiler2026_task_trsm(ptr ...)
 
 define internal void @compiler2026_task_madd(ptr ...)
   call void @madd(...)
-
-define internal noundef i32 @compiler2026_serial_fallback(...)
-  tail call void @trsm(...)
-  tail call void @madd(...)
 ```
 
 ## Runtime 设计
@@ -139,9 +137,11 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 
 - `runtime_alloc` 为 Pass 生成的 task context 分配内存。
 - `runtime_submit` 只接收 task function 指针和 context 指针。
-- worker 线程从队列中取任务，调用 Pass 生成的 task function，并释放 context。
-- `wait` 等待队列为空且所有运行中任务完成。
-- `end` 做最终等待并释放运行时上下文。
+- worker 线程从队列中取任务，调用 Pass 生成的 task function。
+- `wait` 等待队列为空且所有运行中任务完成；主线程也会参与执行队列任务。
+- `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
+- worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
+- task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 
 Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
 
@@ -163,8 +163,8 @@ Pass 插入的 wait 保证：
 ## 当前限制
 
 - 当前版本仍是 panel-barrier 调度，不是完全异步 DAG。
-- 当前异步阈值 `b >= 64` 是 Pass 中的保守常量，后续可改成更系统的 profile-guided 或 runtime heuristic。
-- 小 block fallback 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支/函数调用开销。
+- 当前异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`b >= 16` 实验触发过段错误，已回退。
+- 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 
 ## 本地验证
 
@@ -181,7 +181,7 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 详细性能记录见 `docs/performance.md`。

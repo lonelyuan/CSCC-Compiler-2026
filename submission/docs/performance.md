@@ -4,28 +4,41 @@
 
 ## 当前有效结果
 
-当前交付版本是 `ir_outlined_task_pass`：
+当前交付版本是 `ir_async_threshold32`：
 
 ```text
-submission/docs/benchmark_results/ir_outlined_task_pass.csv
+submission/docs/benchmark_results/ir_async_threshold32.csv
 ```
 
 VM 原始输出：
 
 ```text
-/root/bisheng/build/optimization_benchmarks/ir_outlined_task_pass.csv
+/root/bisheng/build/optimization_benchmarks/pass_runtime_threshold32.csv
 ```
 
 结果摘要：
 
 | Suite | serial avg | contestant avg | speedup |
 | --- | ---: | ---: | ---: |
-| `n512_576` | 0.086509s | 0.080239s | 1.078x |
-| `n768` | 0.225177s | 0.151179s | 1.490x |
-| `n1024` | 0.305020s | 0.195797s | 1.558x |
-| `n1152_small_b` | 0.357749s | 0.362946s | 0.986x |
+| `n512_576` | 0.092441s | 0.075444s | 1.227x |
+| `n768` | 0.228311s | 0.130538s | 1.749x |
+| `n1024` | 0.306771s | 0.167911s | 1.827x |
+| `n1152_small_b` | 0.361752s | 0.306669s | 1.180x |
 
-所有 contestant 输出均通过 verifier。
+四个 suite 平均加速比的几何平均约为 `1.467x`。所有 contestant 输出均通过 verifier。
+
+## 本轮优化变化
+
+相对上一版 `ir_outlined_task_pass`，本轮保留 IR-level 算子任务化路线，但做了以下 runtime/阈值优化：
+
+- async 阈值从 `b >= 64` 调整为 `b >= 32`，并确保 Pass 入口分支和 runtime 默认阈值一致。
+- runtime 由每次 `block_cholesky` 调用创建/销毁 worker 改为 thread-local worker 池复用，worker 数变化时才重建。
+- task context 改为 arena 分配，避免每个 `trsm/madd` task 单独 `malloc/free`。
+- `wait()` 中主线程参与执行队列任务，使配置的线程数近似为 `main + workers`。
+- 任务队列从 `deque` 改为可复用 vector 队列，并按当前 block 数预留容量。
+- 提交端减少重复 `notify_one`，降低大量小 task 入队时的条件变量通知开销。
+
+`b >= 16` 也做过实验，但在公开 benchmark 中触发段错误，已回退，不作为可交付配置。
 
 ## 基准组
 
@@ -43,7 +56,7 @@ VM 原始输出：
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 ## 历史结果说明
@@ -54,24 +67,20 @@ LABEL=ir_outlined_task_pass REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scr
 submission/docs/benchmark_results/before_runtime_opt.csv
 submission/docs/benchmark_results/after_runtime_opt.csv
 submission/docs/benchmark_results/after_madd_coarsening.csv
+submission/docs/benchmark_results/ir_loop_pass_final.csv
+submission/docs/benchmark_results/ir_outlined_task_pass.csv
 ```
 
-这些数据来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合编译器赛题对 IR 层算子依赖分析的要求，因此不再作为当前提交方案。
+前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
 
 ## 结论
 
-当前 IR-level Pass 相比旧函数替换版本性能下降，但结构更符合赛题要求：
+当前方案仍是保守的 panel-barrier DAG：
 
-- Pass 直接分析官方 baseline IR。
-- Pass 基于 `LoopInfo` 插入 runtime begin/alloc/submit/wait/end。
-- 原始 `block_cholesky` 循环结构仍保留。
-- `trsm/madd` 原始 call 被 outline 到 Pass 生成的 task function，task function 内直接调用官方 ABI。
-- optimized path 的原始 call site 被替换为通用任务提交，而不是 runtime 中的算子专用 wrapper。
-- 小 block 走由原始 IR 克隆出的 serial fallback。
+- Pass 分析官方 baseline IR 中的 `trsm/madd` call 和 loop exit。
+- 原始 `block_cholesky` 保留为小 block 串行路径。
+- async clone 中的 `trsm/madd` call site 被替换为通用任务提交。
+- Pass 生成的 task function 内直接调用官方 `trsm/madd` ABI。
+- runtime 不包含算子专用 wrapper，不替换官方算子实现。
 
-后续优化方向：
-
-- 不再只做 panel barrier，而是构建真正的异步 DAG ready queue。
-- 在 Pass 层识别 block 坐标表达式，为 `madd` 合并和依赖注册提供 IR 级信息。
-- 对小 block fallback 进一步降低版本化开销。
-- 将 `b >= 64` 的阈值改为 runtime/profile 驱动策略。
+后续更大的性能空间来自真正的 block-coordinate ready queue DAG：让下一 panel 在其依赖 block 更新完成后提前启动，而不是等待整个 trailing matrix 更新完成。

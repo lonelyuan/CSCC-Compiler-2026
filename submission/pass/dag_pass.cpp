@@ -2,6 +2,7 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -23,7 +24,7 @@ constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
-constexpr int kAsyncMinBlockSize = 64;
+constexpr int kAsyncMinBlockSize = 32;
 
 struct RuntimeApi {
     llvm::FunctionCallee begin;
@@ -66,7 +67,8 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
     llvm::LLVMContext &context = module.getContext();
     llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
     llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
-    llvm::Type *size_ty = llvm::IntegerType::get(context, module.getDataLayout().getPointerSizeInBits());
+    llvm::Type *size_ty =
+        llvm::IntegerType::get(context, module.getDataLayout().getPointerSizeInBits());
 
     llvm::FunctionType *alloc_ty = llvm::FunctionType::get(ptr_ty, {size_ty}, false);
 
@@ -101,11 +103,16 @@ void buildOperatorTaskBody(llvm::Module &module, llvm::StructType *context_ty,
     llvm::IRBuilder<> builder(entry);
 
     llvm::Argument *context_arg = task_fn->arg_begin();
-    llvm::Value *arg0 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 0));
-    llvm::Value *arg1 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 1));
-    llvm::Value *arg2 = builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 2));
-    llvm::Value *arg3 = builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 3));
-    llvm::Value *arg4 = builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 4));
+    llvm::Value *arg0 =
+        builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 0));
+    llvm::Value *arg1 =
+        builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 1));
+    llvm::Value *arg2 =
+        builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 2));
+    llvm::Value *arg3 =
+        builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 3));
+    llvm::Value *arg4 =
+        builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 4));
 
     builder.CreateCall(operator_fn, {arg0, arg1, arg2, arg3, arg4});
     builder.CreateRetVoid();
@@ -116,23 +123,26 @@ TaskIr getTaskIr(llvm::Module &module) {
     llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
     llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
 
-    llvm::StructType *context_ty = llvm::StructType::getTypeByName(context, "compiler2026.operator_context");
+    llvm::StructType *context_ty =
+        llvm::StructType::getTypeByName(context, "compiler2026.operator_context");
     if (context_ty == nullptr) {
         context_ty = llvm::StructType::create(context, "compiler2026.operator_context");
         context_ty->setBody({ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty});
     }
 
-    llvm::FunctionType *task_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {ptr_ty}, false);
+    llvm::FunctionType *task_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context), {ptr_ty}, false);
+    llvm::FunctionType *operator_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+
     llvm::Function *trsm_task = module.getFunction("compiler2026_task_trsm");
     if (trsm_task == nullptr) {
         trsm_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
                                            "compiler2026_task_trsm", module);
         trsm_task->addFnAttr("compiler2026.skip");
-        llvm::FunctionCallee trsm =
-            module.getOrInsertFunction("trsm", llvm::FunctionType::get(
-                                                   llvm::Type::getVoidTy(context),
-                                                   {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false));
-        buildOperatorTaskBody(module, context_ty, trsm_task, trsm);
+        buildOperatorTaskBody(module, context_ty, trsm_task,
+                              module.getOrInsertFunction("trsm", operator_ty));
     }
 
     llvm::Function *madd_task = module.getFunction("compiler2026_task_madd");
@@ -140,11 +150,8 @@ TaskIr getTaskIr(llvm::Module &module) {
         madd_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
                                            "compiler2026_task_madd", module);
         madd_task->addFnAttr("compiler2026.skip");
-        llvm::FunctionCallee madd =
-            module.getOrInsertFunction("madd", llvm::FunctionType::get(
-                                                   llvm::Type::getVoidTy(context),
-                                                   {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false));
-        buildOperatorTaskBody(module, context_ty, madd_task, madd);
+        buildOperatorTaskBody(module, context_ty, madd_task,
+                              module.getOrInsertFunction("madd", operator_ty));
     }
 
     return {context_ty, trsm_task, madd_task};
@@ -167,57 +174,52 @@ void addLoopExitWaits(llvm::Loop *loop, llvm::FunctionCallee wait,
     }
 }
 
-llvm::Function *cloneSerialFallback(llvm::Function &function) {
+llvm::Function *cloneForAsync(llvm::Function &function) {
     llvm::Module *module = function.getParent();
-    llvm::Function *fallback = llvm::Function::Create(
+    llvm::Function *async_fn = llvm::Function::Create(
         function.getFunctionType(), llvm::GlobalValue::InternalLinkage,
-        "compiler2026_serial_fallback", module);
-    fallback->copyAttributesFrom(&function);
-    fallback->addFnAttr("compiler2026.skip");
+        "compiler2026_async_impl", module);
+    async_fn->copyAttributesFrom(&function);
+    async_fn->addFnAttr("compiler2026.skip");
 
     llvm::ValueToValueMapTy value_map;
-    auto dest_arg = fallback->arg_begin();
+    auto dest_arg = async_fn->arg_begin();
     for (const llvm::Argument &source_arg : function.args()) {
         dest_arg->setName(source_arg.getName());
         value_map[&source_arg] = &*dest_arg++;
     }
 
     llvm::SmallVector<llvm::ReturnInst *, 4> returns;
-    llvm::CloneFunctionInto(fallback, &function, value_map,
+    llvm::CloneFunctionInto(async_fn, &function, value_map,
                             llvm::CloneFunctionChangeType::LocalChangesOnly, returns);
-    return fallback;
+    return async_fn;
 }
 
-llvm::BasicBlock *insertSerialFallbackGuard(llvm::Function &function,
-                                            llvm::Function *fallback,
-                                            llvm::Value *b) {
+void insertAsyncDispatch(llvm::Function &function, llvm::Function *async_fn, llvm::Value *b) {
     llvm::LLVMContext &context = function.getContext();
     llvm::BasicBlock &entry = function.getEntryBlock();
     llvm::Instruction *split_point = &*entry.getFirstInsertionPt();
-    llvm::BasicBlock *optimized_block =
-        entry.splitBasicBlock(split_point, "compiler2026.optimized");
+    llvm::BasicBlock *serial_block = entry.splitBasicBlock(split_point, "compiler2026.serial");
 
     llvm::Instruction *old_branch = entry.getTerminator();
     old_branch->eraseFromParent();
 
-    llvm::BasicBlock *fallback_block =
-        llvm::BasicBlock::Create(context, "compiler2026.serial_fallback", &function,
-                                 optimized_block);
+    llvm::BasicBlock *async_block =
+        llvm::BasicBlock::Create(context, "compiler2026.async", &function, serial_block);
 
     llvm::IRBuilder<> entry_builder(&entry);
-    llvm::Value *use_fallback = entry_builder.CreateICmpSLT(
+    llvm::Value *use_async = entry_builder.CreateICmpSGE(
         b, llvm::ConstantInt::get(b->getType(), kAsyncMinBlockSize));
-    entry_builder.CreateCondBr(use_fallback, fallback_block, optimized_block);
+    entry_builder.CreateCondBr(use_async, async_block, serial_block);
 
-    llvm::IRBuilder<> fallback_builder(fallback_block);
+    llvm::IRBuilder<> async_builder(async_block);
     std::vector<llvm::Value *> args;
     args.reserve(function.arg_size());
     for (llvm::Argument &arg : function.args()) {
         args.push_back(&arg);
     }
-    llvm::CallInst *result = fallback_builder.CreateCall(fallback, args);
-    fallback_builder.CreateRet(result);
-    return optimized_block;
+    llvm::CallInst *result = async_builder.CreateCall(async_fn, args);
+    async_builder.CreateRet(result);
 }
 
 void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime,
@@ -226,7 +228,8 @@ void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime
     llvm::IRBuilder<> builder(call);
     const llvm::DataLayout &layout = module->getDataLayout();
     const uint64_t context_size = layout.getTypeAllocSize(task_ir.context_ty).getFixedValue();
-    llvm::Type *size_ty = llvm::IntegerType::get(module->getContext(), layout.getPointerSizeInBits());
+    llvm::Type *size_ty =
+        llvm::IntegerType::get(module->getContext(), layout.getPointerSizeInBits());
 
     llvm::Value *context = builder.CreateCall(
         runtime.alloc, {llvm::ConstantInt::get(size_ty, context_size)});
@@ -239,10 +242,65 @@ void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime
     call->eraseFromParent();
 }
 
+void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir) {
+    llvm::DominatorTree dominator_tree(async_fn);
+    llvm::LoopInfo loop_info(dominator_tree);
+
+    auto arg = async_fn.arg_begin();
+    (void)&*arg++;
+    (void)&*arg++;
+    llvm::Value *n = &*arg++;
+    llvm::Value *b = &*arg++;
+
+    llvm::IRBuilder<> entry_builder(&*async_fn.getEntryBlock().getFirstInsertionPt());
+    entry_builder.CreateCall(runtime.begin, {n, b});
+
+    std::vector<llvm::CallBase *> trsm_calls;
+    std::vector<llvm::CallBase *> madd_calls;
+    for (llvm::BasicBlock &block : async_fn) {
+        for (llvm::Instruction &instruction : block) {
+            auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+            if (call == nullptr) {
+                continue;
+            }
+
+            const llvm::StringRef callee = getCalledName(*call);
+            if (callee == "trsm") {
+                trsm_calls.push_back(call);
+            } else if (callee == "madd") {
+                madd_calls.push_back(call);
+            }
+        }
+    }
+
+    std::set<llvm::BasicBlock *> wait_blocks;
+
+    for (llvm::CallBase *call : trsm_calls) {
+        llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+        addLoopExitWaits(loop, runtime.wait, wait_blocks);
+        replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
+    }
+
+    for (llvm::CallBase *call : madd_calls) {
+        llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+        llvm::Loop *sync_loop =
+            (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
+        addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
+        replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
+    }
+
+    for (llvm::BasicBlock &block : async_fn) {
+        if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator())) {
+            llvm::IRBuilder<> builder(ret);
+            builder.CreateCall(runtime.end);
+        }
+    }
+}
+
 class OperatorDagPass : public llvm::PassInfoMixin<OperatorDagPass> {
 public:
     llvm::PreservedAnalyses run(llvm::Function &function,
-                                llvm::FunctionAnalysisManager &analysis_manager) {
+                                llvm::FunctionAnalysisManager &) {
         if (!isBlockCholesky(function)) {
             return llvm::PreservedAnalyses::all();
         }
@@ -250,64 +308,16 @@ public:
         llvm::Module *module = function.getParent();
         RuntimeApi runtime = getRuntimeApi(*module);
         TaskIr task_ir = getTaskIr(*module);
-        llvm::LoopInfo &loop_info = analysis_manager.getResult<llvm::LoopAnalysis>(function);
 
         auto arg = function.arg_begin();
         (void)&*arg++;
         (void)&*arg++;
-        llvm::Value *n = &*arg++;
+        (void)&*arg++;
         llvm::Value *b = &*arg++;
 
-        llvm::Function *serial_fallback = cloneSerialFallback(function);
-        llvm::BasicBlock *optimized_block = insertSerialFallbackGuard(function, serial_fallback, b);
-
-        llvm::IRBuilder<> entry_builder(&*optimized_block->getFirstInsertionPt());
-        entry_builder.CreateCall(runtime.begin, {n, b});
-
-        std::vector<llvm::CallBase *> trsm_calls;
-        std::vector<llvm::CallBase *> madd_calls;
-        for (llvm::BasicBlock &block : function) {
-            for (llvm::Instruction &instruction : block) {
-                auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                if (call == nullptr) {
-                    continue;
-                }
-
-                const llvm::StringRef callee = getCalledName(*call);
-                if (callee == "trsm") {
-                    trsm_calls.push_back(call);
-                } else if (callee == "madd") {
-                    madd_calls.push_back(call);
-                }
-            }
-        }
-
-        std::set<llvm::BasicBlock *> wait_blocks;
-
-        for (llvm::CallBase *call : trsm_calls) {
-            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-            addLoopExitWaits(loop, runtime.wait, wait_blocks);
-            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
-        }
-
-        for (llvm::CallBase *call : madd_calls) {
-            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-            llvm::Loop *sync_loop = (loop != nullptr && loop->getParentLoop() != nullptr)
-                                        ? loop->getParentLoop()
-                                        : loop;
-            addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
-            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
-        }
-
-        for (llvm::BasicBlock &block : function) {
-            if (block.getName() == "compiler2026.serial_fallback") {
-                continue;
-            }
-            if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator())) {
-                llvm::IRBuilder<> builder(ret);
-                builder.CreateCall(runtime.end);
-            }
-        }
+        llvm::Function *async_fn = cloneForAsync(function);
+        transformAsyncFunction(*async_fn, runtime, task_ir);
+        insertAsyncDispatch(function, async_fn, b);
 
         return llvm::PreservedAnalyses::none();
     }
@@ -323,7 +333,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     return {
         LLVM_PLUGIN_API_VERSION,
         "contestant-pass",
-        "0.3",
+        "0.4",
         [](llvm::PassBuilder &pass_builder) {
             pass_builder.registerPipelineParsingCallback(
                 [](llvm::StringRef name, llvm::ModulePassManager &module_pass_manager,
