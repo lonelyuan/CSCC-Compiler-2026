@@ -1,0 +1,5 @@
+label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms
+async_predicate_threads1_smoke,n512_576,1,1,auto,32,1,0.087391861,0.086325765,1.012350,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_predicate_threads1_smoke,n768,1,1,auto,32,1,0.226732578,0.225842567,1.003941,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_predicate_threads1_smoke,n1024,1,1,auto,32,1,0.318791069,0.311051225,1.024883,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_predicate_threads1_smoke,n1152_small_b,1,1,auto,32,1,0.369421583,0.384532619,0.960703,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000

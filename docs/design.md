@@ -49,7 +49,7 @@ else
     run original serial IR path;
 ```
 
-默认 predicate 仍使用 `b >= 32` 且 block 数大于 1；`COMPILER2026_ASYNC_MIN_B` 可以覆盖阈值，用于 profile/benchmark 调参。
+默认 predicate 仍使用 `b >= 32`、block 数大于 1 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 可以覆盖阈值，用于 profile/benchmark 调参。
 
 async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
@@ -143,7 +143,7 @@ extern "C" void compiler2026_runtime_end();
 
 Runtime 内部维护一个 thread-local `AsyncRuntime`：
 
-- `runtime_should_async` 集中管理 async path 入口阈值，使 Pass 入口分支、runtime 线程选择和 benchmark 记录的 `async_min_b` 保持一致。
+- `runtime_should_async` 集中管理 async path 入口阈值和线程数判断，使 Pass 入口分支、runtime 线程选择和 benchmark 记录的 `async_min_b` 保持一致。
 - `runtime_alloc` 为 Pass 生成的 task context 分配内存。
 - `runtime_submit` 只接收 task function 指针和 context 指针。
 - `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。

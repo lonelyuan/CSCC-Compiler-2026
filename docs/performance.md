@@ -32,7 +32,7 @@ VM 原始输出：
 当前版本保留 IR-level 算子任务化路线，但做了以下 runtime/阈值优化：
 
 - async 阈值从 `b >= 64` 调整为 `b >= 32`，并确保 Pass 入口分支和 runtime 默认阈值一致。
-- Pass 入口分支改为调用 `compiler2026_runtime_should_async(n, b)`，使 `COMPILER2026_ASYNC_MIN_B` 不只是 CSV 元数据，而是实际控制 async path 是否启用。
+- Pass 入口分支改为调用 `compiler2026_runtime_should_async(n, b)`，使 `COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_DAG_THREADS` 不只是 CSV 元数据，而是实际控制 async path 是否启用。
 - runtime 由每次 `block_cholesky` 调用创建/销毁 worker 改为 thread-local worker 池复用，worker 数变化时才重建。
 - task context 改为 arena 分配，避免每个 `trsm/madd` task 单独 `malloc/free`。
 - `wait()` 中主线程参与执行队列任务，使配置的线程数近似为 `main + workers`。
@@ -111,10 +111,11 @@ docs/benchmark_results/ready_queue_batch8_repeat3.csv
 docs/benchmark_results/panel_dag_cleanup_profile_smoke.csv
 docs/benchmark_results/async_predicate_profile_smoke.csv
 docs/benchmark_results/async_predicate_disabled_smoke.csv
+docs/benchmark_results/async_predicate_threads1_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv` 和 `async_predicate_disabled_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑和阈值开关行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv` 和 `async_predicate_threads1_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关和线程数开关行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
 
 ## 结论
 

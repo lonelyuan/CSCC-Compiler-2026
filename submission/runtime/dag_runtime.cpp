@@ -723,7 +723,7 @@ extern "C" int compiler2026_runtime_should_async(int n, int b) {
         return 0;
     }
 
-    return (n / b > 1) ? 1 : 0;
+    return (resolveThreadCount(n, b) > 1) ? 1 : 0;
 }
 
 extern "C" void compiler2026_runtime_register_task(TaskFn fn, const char *name) {
