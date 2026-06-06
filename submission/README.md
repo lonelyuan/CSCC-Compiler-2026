@@ -45,6 +45,9 @@ The package script writes both:
 - `dist/submission.tar.gz`
 - `dist/submission.zip`
 
+Both archives place `CMakeLists.txt` at archive root so the judge can run CMake
+directly on the extracted submission directory.
+
 Current implementation:
 
 - The pass analyzes the official `contest::block_cholesky` IR with LoopInfo.
