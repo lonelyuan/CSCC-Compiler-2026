@@ -62,7 +62,7 @@ cd /root/bisheng
 COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
-新增 CSV 字段包括 `task_batch`、`async_min_b`、`async_decisions`、`async_enabled`、`async_disabled`、`async_disabled_small_b`、`async_disabled_threads`、`async_disabled_single_block`、`profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`dag_nodes`、`dag_edges`、`dag_initial_ready`、`dag_released`、`max_dag_pending`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
+新增 CSV 字段包括 `task_batch`、`async_min_b`、`async_decisions`、`async_enabled`、`async_disabled`、`async_disabled_small_b`、`async_disabled_threads`、`async_disabled_single_block`、`profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`dag_nodes`、`dag_edges`、`dag_initial_ready`、`dag_released`、`max_dag_pending`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。benchmark 终端摘要同时输出所有行的 `serial_total`、`contestant_total`、算术平均 speedup 和几何平均 speedup，避免后续调参只看单 suite 或手算几何平均。
 
 示例输出节选：
 
@@ -114,10 +114,11 @@ docs/benchmark_results/async_predicate_disabled_smoke.csv
 docs/benchmark_results/async_predicate_threads1_smoke.csv
 docs/benchmark_results/async_decision_profile_smoke.csv
 docs/benchmark_results/async_decision_threads1_smoke.csv
+docs/benchmark_results/benchmark_overall_summary_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv` 和 `async_decision_threads1_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、线程数开关和 async decision 原因聚合行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv` 和 `benchmark_overall_summary_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、线程数开关、async decision 原因聚合和整体 summary 输出行为，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
 
 ## 结论
 

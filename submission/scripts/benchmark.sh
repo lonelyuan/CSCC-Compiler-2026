@@ -252,7 +252,7 @@ run_suite "n1024" 91 96
 run_suite "n1152_small_b" 97 104
 
 python3 - "${CSV}" <<'PY'
-import csv, statistics, sys
+import csv, math, statistics, sys
 path = sys.argv[1]
 rows = list(csv.DictReader(open(path)))
 print(f"csv={path}")
@@ -264,6 +264,25 @@ for suite in sorted({r["suite"] for r in rows}):
         f"{suite}: serial_avg={statistics.mean(serial):.6f}s "
         f"contestant_avg={statistics.mean(contestant):.6f}s "
         f"speedup_avg={statistics.mean(vals):.3f}x"
+    )
+if rows:
+    speedups = [float(r["speedup"]) for r in rows]
+    serial_total = sum(float(r["serial_seconds"]) for r in rows)
+    contestant_total = sum(float(r["contestant_seconds"]) for r in rows)
+    positive_speedups = [value for value in speedups if value > 0]
+    if positive_speedups:
+        speedup_geo = math.exp(
+            statistics.mean(math.log(value) for value in positive_speedups)
+        )
+    else:
+        speedup_geo = 0.0
+    print(
+        "overall: "
+        f"runs={len(rows)} "
+        f"serial_total={serial_total:.6f}s "
+        f"contestant_total={contestant_total:.6f}s "
+        f"speedup_avg={statistics.mean(speedups):.3f}x "
+        f"speedup_geo={speedup_geo:.3f}x"
     )
 if rows and any(r.get("profile_enabled") == "1" for r in rows):
     decision_rows = [r for r in rows if int(r.get("async_decisions") or 0) > 0]
