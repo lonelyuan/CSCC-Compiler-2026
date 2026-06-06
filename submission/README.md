@@ -60,4 +60,10 @@ Current implementation:
   task functions.
 - No source annotations are required.
 
-Longer-term scaling notes are documented in `docs/roadmap.md`.
+Documentation:
+
+- `docs/design.md`: implementation-level design.
+- `docs/performance.md`: benchmark results.
+- `docs/optimization_principles.md`: beginner-friendly explanation of
+  parallelization and operator DAG scheduling.
+- `docs/roadmap.md`: longer-term scaling notes.
