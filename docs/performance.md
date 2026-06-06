@@ -20,12 +20,12 @@ VM 原始输出：
 
 | Suite | serial avg | contestant avg | speedup |
 | --- | ---: | ---: | ---: |
-| `n512_576` | 0.087846s | 0.070130s | 1.253x |
-| `n768` | 0.226105s | 0.126036s | 1.794x |
-| `n1024` | 0.307123s | 0.165824s | 1.852x |
-| `n1152_small_b` | 0.362749s | 0.290902s | 1.247x |
+| `n512_576` | 0.089390s | 0.072622s | 1.232x |
+| `n768` | 0.228592s | 0.126365s | 1.809x |
+| `n1024` | 0.308963s | 0.165681s | 1.865x |
+| `n1152_small_b` | 0.369142s | 0.287641s | 1.283x |
 
-四个 suite 平均加速比的几何平均约为 `1.509x`。所有 contestant 输出均通过 verifier。
+四个 suite 平均加速比的几何平均约为 `1.520x`。所有 contestant 输出均通过 verifier。
 
 ## 本轮优化变化
 
@@ -61,7 +61,7 @@ cd /root/bisheng
 COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
-新增 CSV 字段包括 `profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`dag_nodes`、`dag_edges`、`dag_initial_ready`、`dag_released`、`max_dag_pending`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
+新增 CSV 字段包括 `task_batch`、`async_min_b`、`profile_calls`、`total_tasks`、`main_tasks`、`worker_tasks`、`dag_nodes`、`dag_edges`、`dag_initial_ready`、`dag_released`、`max_dag_pending`、`queue_ms`、`exec_ms`、`worker_idle_ms`、`trsm_count`、`madd_count` 等。每个 suite/run 可能包含多个矩阵调用，benchmark 会把同一次运行里的 profile 行聚合到一条 CSV 记录。默认不打开 profile 时这些字段为 `0`，计时 CSV 结构保持一致。
 
 示例输出节选：
 
@@ -106,10 +106,11 @@ docs/benchmark_results/runtime_ready_queue_trsm_deps.csv
 docs/benchmark_results/profile_csv_smoke.csv
 docs/benchmark_results/ready_queue_profile_csv_smoke.csv
 docs/benchmark_results/dag_profile_counters_smoke.csv
+docs/benchmark_results/ready_queue_batch8_repeat3.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv` 和 `dag_profile_counters_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段和聚合逻辑，不作为正式性能均值。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv` 和 `dag_profile_counters_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段和聚合逻辑，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
 
 ## 结论
 

@@ -13,6 +13,8 @@ OPT_BIN="${OPT:-/opt/bisheng/bin/opt}"
 LLVM_LINK_BIN="${LLVM_LINK:-/opt/bisheng/bin/llvm-link}"
 THREADS="${COMPILER2026_DAG_THREADS:-4}"
 PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
+TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
+ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-32}"
 REPEAT="${REPEAT:-3}"
 LABEL="${LABEL:-run}"
 
@@ -65,7 +67,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -105,7 +107,8 @@ run_suite() {
         "${suite_dir}/contestant_${run}.out" > "${suite_dir}/contestant.verify"
     fi
 
-    python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${PROFILE}" \
+    python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${TASK_BATCH}" \
+      "${ASYNC_MIN_B}" "${PROFILE}" \
       "${suite_dir}/serial_${run}.time" \
       "${suite_dir}/contestant_${run}.time" \
       "${suite_dir}/contestant_${run}.profile" >> "${CSV}" <<'PY'
@@ -113,7 +116,18 @@ import csv
 import re
 import sys
 
-label, suite, run, threads, profile_enabled, serial_path, contestant_path, profile_path = sys.argv[1:]
+(
+    label,
+    suite,
+    run,
+    threads,
+    task_batch,
+    async_min_b,
+    profile_enabled,
+    serial_path,
+    contestant_path,
+    profile_path,
+) = sys.argv[1:]
 serial = float(open(serial_path).read())
 contestant = float(open(contestant_path).read())
 speedup = serial / contestant if contestant > 0 else float("inf")
@@ -175,6 +189,8 @@ writer.writerow([
     suite,
     run,
     threads,
+    task_batch,
+    async_min_b,
     "1" if profile_enabled not in ("", "0") else "0",
     f"{serial:.9f}",
     f"{contestant:.9f}",
