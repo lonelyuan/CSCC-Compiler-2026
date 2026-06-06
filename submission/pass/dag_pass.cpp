@@ -22,6 +22,7 @@ namespace {
 constexpr const char *kBegin = "compiler2026_runtime_begin";
 constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
+constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
 constexpr int kAsyncMinBlockSize = 32;
@@ -30,6 +31,7 @@ struct RuntimeApi {
     llvm::FunctionCallee begin;
     llvm::FunctionCallee alloc;
     llvm::FunctionCallee submit;
+    llvm::FunctionCallee register_task;
     llvm::FunctionCallee wait;
     llvm::FunctionCallee end;
 };
@@ -76,6 +78,7 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         declareVoidRuntime(module, kBegin, {int32_ty, int32_ty}),
         module.getOrInsertFunction(kAlloc, alloc_ty),
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
+        declareVoidRuntime(module, kRegisterTask, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kWait, {}),
         declareVoidRuntime(module, kEnd, {}),
     };
@@ -254,6 +257,12 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
 
     llvm::IRBuilder<> entry_builder(&*async_fn.getEntryBlock().getFirstInsertionPt());
     entry_builder.CreateCall(runtime.begin, {n, b});
+    entry_builder.CreateCall(runtime.register_task,
+                             {task_ir.trsm_task,
+                              entry_builder.CreateGlobalStringPtr("trsm")});
+    entry_builder.CreateCall(runtime.register_task,
+                             {task_ir.madd_task,
+                              entry_builder.CreateGlobalStringPtr("madd")});
 
     std::vector<llvm::CallBase *> trsm_calls;
     std::vector<llvm::CallBase *> madd_calls;

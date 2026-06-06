@@ -29,7 +29,15 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+```
+
+Enable runtime profiling for an async case:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh
 ```
 
 Package artifacts:
@@ -56,8 +64,9 @@ Current implementation:
   synchronous, outlines async-path `trsm` and `madd`
   calls into generated IR task functions, and inserts waits at loop exits.
 - The runtime is a generic reusable task scheduler with arena context
-  allocation. Official `trsm` and `madd` ABI calls remain in Pass-generated IR
-  task functions.
+  allocation, adaptive task submit/dequeue batching, and an opt-in profiling
+  mode. Official `trsm` and `madd` ABI calls remain in Pass-generated IR task
+  functions.
 - No source annotations are required.
 
 Documentation:

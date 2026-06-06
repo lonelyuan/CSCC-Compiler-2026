@@ -272,19 +272,22 @@ runtime 提供非常小的接口：
 
 ```c
 void compiler2026_runtime_begin(int n, int b);
+void compiler2026_runtime_register_task(void (*fn)(void *), const char *name);
 void *compiler2026_runtime_alloc(size_t size);
 void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
 void compiler2026_runtime_wait();
 void compiler2026_runtime_end();
 ```
 
-它的职责是通用任务调度，而不是理解 Cholesky 算法。也就是说，runtime 不知道某个任务是 `trsm` 还是 `madd`，只知道：
+它的职责是通用任务调度，而不是理解 Cholesky 算法。调度路径只依赖函数指针和参数指针：
 
 ```text
 这里有一个函数指针 fn
 这里有一段参数 ctx
 请找一个线程执行 fn(ctx)
 ```
+
+`runtime_register_task` 只在打开 `COMPILER2026_DAG_PROFILE=1` 时给统计输出提供名字，例如 `trsm`、`madd`；它不改变任务执行方式，也不把官方算子封装进 runtime。
 
 当前 runtime 做了几项优化：
 
@@ -293,6 +296,8 @@ void compiler2026_runtime_end();
 - `wait()` 时主线程也参与执行任务，减少主线程空等。
 - 使用可复用 vector 队列，并根据矩阵 block 数预留容量。
 - 减少大量任务提交时的重复唤醒。
+- 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销。
+- 可选输出 task 数、队列等待、执行时间和 worker idle 等 profile 指标。
 
 简化执行流程：
 
@@ -427,7 +432,7 @@ writes block(row, col)
 - 核心数多时，需要更多任务填满队列。
 - 核心数少时，过多任务只会增加开销。
 
-后续可以让 runtime 或 Pass 根据 `n, b, block_count, thread_count` 选择：
+当前 runtime 已先按 `b` 做了一层轻量批量调度；后续可以让 runtime 或 Pass 进一步根据 `n, b, block_count, thread_count` 选择：
 
 ```text
 小 b：多个 madd 合并成一个 range task
@@ -445,7 +450,7 @@ writes block(row, col)
 - work stealing。
 - NUMA-aware task placement。
 - worker pinning。
-- 对任务提交、等待、执行时间做 profile。
+- 把当前 profile 指标接入 benchmark CSV，并用于自动选择阈值和 task batch。
 
 ### 7.5 面向真实平台的实验方法
 

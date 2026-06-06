@@ -62,6 +62,8 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - 根据 `n, b, block_count, thread_count` 自动选择粒度。
 - 收集轻量 profile，为下一次调用选择阈值。
 
+当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 task 数、队列等待、执行时间、worker idle、批量出队信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。下一步应把这些统计沉淀为 benchmark CSV 字段，并用它们驱动 `COMPILER2026_TASK_BATCH`、异步阈值和未来 range task 的自动选择。
+
 ### 4. 多核和 NUMA 亲和性
 
 真实鲲鹏平台上需要测试：
@@ -72,6 +74,8 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - 避免单全局队列在 48/64 核上成为瓶颈。
 
 当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。
+
+当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA 绑定。
 
 ## 需要调研的方向
 
@@ -93,7 +97,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 - Panel barrier 过保守，限制大核数可扩展性。
 - Pass 还没有通用恢复数组子块坐标和读写集合。
-- Runtime 仍是单全局队列，扩展到 32 核以上可能出现锁竞争。
-- 阈值仍来自经验测试，需要改成 profile/runtime heuristic。
+- Runtime 仍以单全局队列为核心，虽然已有批量提交/出队缓解，扩展到 32 核以上仍可能出现锁竞争。
+- 阈值和 task batch 大小仍来自经验测试；runtime 已能输出 profile，但尚未将 profile 闭环成自动 heuristic。
 
 短期目标是把 `trsm/madd` 的坐标和依赖边从 IR 中恢复出来；中期目标是生成 ready-queue DAG；长期目标是把这个 pass 做成可解释、可迁移的 tiled linear algebra taskization pass。

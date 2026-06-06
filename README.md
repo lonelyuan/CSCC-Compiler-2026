@@ -44,7 +44,7 @@
 
 - `submission/`：竞赛提交工程，评测平台会从这里构建 LLVM Pass 和 runtime。
 - `submission/pass/dag_pass.cpp`：LLVM Pass 实现，负责 IR 版本化、算子调用识别、task function 生成和同步点插入。
-- `submission/runtime/dag_runtime.cpp`：通用任务运行时，负责 worker 池、任务队列、arena 分配和 wait 协作执行。
+- `submission/runtime/dag_runtime.cpp`：通用任务运行时，负责 worker 池、任务队列、arena 分配、wait 协作执行和可选 profiling。
 - `docs/`：项目文档，已经从 `submission/docs` 提升到仓库根目录，便于统一维护。
 - `docs/optimization_principles.md`：面向基础编程读者的并行优化和算子图调度原理说明。
 - `docs/design.md`：实现级设计说明。
@@ -109,7 +109,15 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+```
+
+打开 runtime profile：
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh
 ```
 
 生成提交包：

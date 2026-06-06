@@ -1,0 +1,13 @@
+label,suite,repeat,threads,serial_seconds,contestant_seconds,speedup
+runtime_submit_dequeue_batch,n512_576,1,4,0.087377358,0.071927880,1.214791
+runtime_submit_dequeue_batch,n512_576,2,4,0.088544340,0.071768446,1.233750
+runtime_submit_dequeue_batch,n512_576,3,4,0.086829052,0.071358218,1.216805
+runtime_submit_dequeue_batch,n768,1,4,0.226325127,0.130948744,1.728349
+runtime_submit_dequeue_batch,n768,2,4,0.225819340,0.130108068,1.735629
+runtime_submit_dequeue_batch,n768,3,4,0.233439740,0.130172348,1.793313
+runtime_submit_dequeue_batch,n1024,1,4,0.304887658,0.166526606,1.830865
+runtime_submit_dequeue_batch,n1024,2,4,0.307061334,0.166974973,1.838966
+runtime_submit_dequeue_batch,n1024,3,4,0.306177779,0.166760109,1.836037
+runtime_submit_dequeue_batch,n1152_small_b,1,4,0.371528332,0.307864227,1.206793
+runtime_submit_dequeue_batch,n1152_small_b,2,4,0.360498478,0.311563246,1.157064
+runtime_submit_dequeue_batch,n1152_small_b,3,4,0.363052995,0.305335029,1.189032

@@ -1,6 +1,11 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <memory>
@@ -12,8 +17,44 @@
 namespace {
 
 using TaskFn = void (*)(void *);
+constexpr std::size_t kMaxTaskBatch = 16;
+constexpr std::size_t kMaxProfiledTasks = 8;
+
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t nowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now().time_since_epoch()).count());
+}
+
+bool profileEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_DAG_PROFILE");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
 
 class AsyncRuntime {
+    struct Task {
+        TaskFn fn;
+        void *context;
+        std::uint64_t enqueue_ns;
+    };
+
+    struct BatchProfile {
+        std::array<std::uint64_t, kMaxTaskBatch> task_exec_ns{};
+        std::array<std::uint64_t, kMaxTaskBatch> task_queue_ns{};
+        std::uint64_t total_exec_ns = 0;
+        std::uint64_t total_queue_ns = 0;
+    };
+
+    struct TaskProfile {
+        TaskFn fn = nullptr;
+        const char *name = nullptr;
+        std::uint64_t count = 0;
+        std::uint64_t queue_ns = 0;
+        std::uint64_t exec_ns = 0;
+    };
+
 public:
     explicit AsyncRuntime(std::size_t worker_count) {
         if (worker_count == 0) {
@@ -41,28 +82,74 @@ public:
         }
     }
 
-    void resetForCall(std::size_t reserve_tasks = 0) {
+    void resetForCall(std::size_t reserve_tasks = 0, std::size_t task_batch_size = 1,
+                      int n = 0, int b = 0, std::size_t total_threads = 1) {
         wait();
+        resetProfile(n, b, total_threads, task_batch_size);
+        resetQueue(reserve_tasks, task_batch_size);
+    }
+
+    void finishCall() {
+        wait();
+        reportProfile();
+        resetQueue(0, 1);
+        profile_enabled_.store(false, std::memory_order_relaxed);
+    }
+
+    void registerTask(TaskFn fn, const char *name) {
+        if (!profile_enabled_.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        TaskProfile &profile = profileForTaskLocked(fn);
+        profile.name = name;
+    }
+
+    void resetQueue(std::size_t reserve_tasks, std::size_t task_batch_size) {
         if (reserve_tasks > tasks_.capacity()) {
             tasks_.reserve(reserve_tasks);
         }
         tasks_.clear();
         task_head_ = 0;
         chunk_offset_ = 0;
+        pending_count_ = 0;
+        task_batch_size_ = std::max<std::size_t>(
+            1, std::min<std::size_t>(task_batch_size, kMaxTaskBatch));
         worker_error_ = nullptr;
     }
 
     void submit(TaskFn fn, void *context) {
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        Task task{fn, context, profiling ? nowNs() : 0};
         if (workers_.empty()) {
-            fn(context);
+            BatchProfile profile = runBatch(&task, 1, profiling);
+            if (profiling) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                recordBatchProfileLocked(&task, 1, profile, false);
+            }
             return;
         }
 
+        if (task_batch_size_ > 1) {
+            pending_tasks_[pending_count_++] = task;
+            if (pending_count_ >= task_batch_size_) {
+                flushPendingTasks();
+            }
+            return;
+        }
+
+        enqueueTask(task);
+    }
+
+    void enqueueTask(Task task) {
         bool should_notify = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.push_back({fn, context});
-            should_notify = (tasks_.size() - task_head_) <= workers_.size();
+            tasks_.push_back(task);
+            const std::size_t ready = tasks_.size() - task_head_;
+            updateMaxReadyLocked(ready);
+            should_notify = ready <= workers_.size();
         }
         if (should_notify) {
             work_cv_.notify_one();
@@ -85,23 +172,18 @@ public:
     }
 
     void wait() {
+        flushPendingTasks();
         if (workers_.empty()) {
             return;
         }
 
         while (true) {
-            Task task{};
-            bool has_task = false;
+            std::array<Task, kMaxTaskBatch> batch{};
+            std::size_t batch_count = 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 if (task_head_ < tasks_.size()) {
-                    task = tasks_[task_head_++];
-                    if (task_head_ == tasks_.size()) {
-                        tasks_.clear();
-                        task_head_ = 0;
-                    }
-                    ++active_tasks_;
-                    has_task = true;
+                    batch_count = takeReadyTasksLocked(batch.data());
                 } else if (active_tasks_ == 0) {
                     break;
                 } else {
@@ -110,22 +192,16 @@ public:
                 }
             }
 
-            if (has_task) {
-                try {
-                    task.fn(task.context);
-                } catch (...) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (!worker_error_) {
-                        worker_error_ = std::current_exception();
-                    }
-                }
+            BatchProfile profile =
+                runBatch(batch.data(), batch_count,
+                         profile_enabled_.load(std::memory_order_relaxed));
 
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    --active_tasks_;
-                    if (tasks_.empty() && active_tasks_ == 0) {
-                        done_cv_.notify_all();
-                    }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_tasks_ -= batch_count;
+                recordBatchProfileLocked(batch.data(), batch_count, profile, false);
+                if (tasks_.empty() && active_tasks_ == 0) {
+                    done_cv_.notify_all();
                 }
             }
         }
@@ -138,40 +214,30 @@ public:
     }
 
 private:
-    struct Task {
-        TaskFn fn;
-        void *context;
-    };
-
     void workerLoop() {
         while (true) {
-            Task task{};
+            std::array<Task, kMaxTaskBatch> batch{};
+            std::size_t batch_count = 0;
+            const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+            const std::uint64_t wait_start_ns = profiling ? nowNs() : 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 work_cv_.wait(lock, [this]() { return stopping_ || task_head_ < tasks_.size(); });
+                if (profiling) {
+                    worker_idle_ns_ += nowNs() - wait_start_ns;
+                }
                 if (stopping_ && task_head_ == tasks_.size()) {
                     return;
                 }
-                task = tasks_[task_head_++];
-                if (task_head_ == tasks_.size()) {
-                    tasks_.clear();
-                    task_head_ = 0;
-                }
-                ++active_tasks_;
+                batch_count = takeReadyTasksLocked(batch.data());
             }
 
-            try {
-                task.fn(task.context);
-            } catch (...) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!worker_error_) {
-                    worker_error_ = std::current_exception();
-                }
-            }
+            BatchProfile profile = runBatch(batch.data(), batch_count, profiling);
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                --active_tasks_;
+                active_tasks_ -= batch_count;
+                recordBatchProfileLocked(batch.data(), batch_count, profile, true);
                 if (tasks_.empty() && active_tasks_ == 0) {
                     done_cv_.notify_all();
                 }
@@ -179,9 +245,187 @@ private:
         }
     }
 
+    void flushPendingTasks() {
+        if (pending_count_ == 0) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tasks_.insert(tasks_.end(), pending_tasks_.begin(),
+                          pending_tasks_.begin() + pending_count_);
+            updateMaxReadyLocked(tasks_.size() - task_head_);
+            if (profile_enabled_.load(std::memory_order_relaxed)) {
+                ++submit_flushes_;
+            }
+        }
+        pending_count_ = 0;
+        work_cv_.notify_all();
+    }
+
+    std::size_t takeReadyTasksLocked(Task *batch) {
+        const std::size_t available = tasks_.size() - task_head_;
+        const std::size_t count = chooseBatchCount(available);
+        for (std::size_t i = 0; i < count; ++i) {
+            batch[i] = tasks_[task_head_ + i];
+        }
+        task_head_ += count;
+        active_tasks_ += count;
+        if (profile_enabled_.load(std::memory_order_relaxed)) {
+            ++dequeue_batches_;
+            max_dequeue_batch_ = std::max(max_dequeue_batch_, count);
+        }
+        if (task_head_ == tasks_.size()) {
+            tasks_.clear();
+            task_head_ = 0;
+        }
+        return count;
+    }
+
+    std::size_t chooseBatchCount(std::size_t available) const {
+        if (task_batch_size_ <= 1) {
+            return 1;
+        }
+
+        const std::size_t participants = workers_.size() + 1;
+        if (available <= participants * 2) {
+            return 1;
+        }
+
+        const std::size_t fair_batch = std::max<std::size_t>(1, available / participants);
+        return std::min(task_batch_size_, std::min(fair_batch, available));
+    }
+
+    BatchProfile runBatch(const Task *batch, std::size_t count, bool profiling) {
+        BatchProfile profile;
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint64_t start_ns = profiling ? nowNs() : 0;
+            if (profiling && batch[i].enqueue_ns != 0) {
+                profile.task_queue_ns[i] = start_ns - batch[i].enqueue_ns;
+                profile.total_queue_ns += profile.task_queue_ns[i];
+            }
+            try {
+                batch[i].fn(batch[i].context);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!worker_error_) {
+                    worker_error_ = std::current_exception();
+                }
+            }
+            if (profiling) {
+                const std::uint64_t elapsed_ns = nowNs() - start_ns;
+                profile.task_exec_ns[i] = elapsed_ns;
+                profile.total_exec_ns += elapsed_ns;
+            }
+        }
+        return profile;
+    }
+
+    void updateMaxReadyLocked(std::size_t ready) {
+        if (!profile_enabled_.load(std::memory_order_relaxed)) {
+            return;
+        }
+        max_ready_tasks_ = std::max(max_ready_tasks_, ready);
+    }
+
+    TaskProfile &profileForTaskLocked(TaskFn fn) {
+        for (std::size_t i = 0; i < task_profile_count_; ++i) {
+            if (task_profiles_[i].fn == fn) {
+                return task_profiles_[i];
+            }
+        }
+        if (task_profile_count_ < task_profiles_.size()) {
+            TaskProfile &profile = task_profiles_[task_profile_count_++];
+            profile.fn = fn;
+            return profile;
+        }
+        return task_profiles_.back();
+    }
+
+    void recordBatchProfileLocked(const Task *batch, std::size_t count,
+                                  const BatchProfile &profile, bool worker_thread) {
+        if (!profile_enabled_.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        total_tasks_ += count;
+        total_queue_ns_ += profile.total_queue_ns;
+        total_exec_ns_ += profile.total_exec_ns;
+        if (worker_thread) {
+            worker_tasks_ += count;
+        } else {
+            main_tasks_ += count;
+        }
+
+        for (std::size_t i = 0; i < count; ++i) {
+            TaskProfile &task_profile = profileForTaskLocked(batch[i].fn);
+            ++task_profile.count;
+            task_profile.queue_ns += profile.task_queue_ns[i];
+            task_profile.exec_ns += profile.task_exec_ns[i];
+        }
+    }
+
+    void resetProfile(int n, int b, std::size_t total_threads, std::size_t task_batch_size) {
+        profile_enabled_.store(profileEnabledFromEnv(), std::memory_order_relaxed);
+        n_ = n;
+        b_ = b;
+        total_threads_ = total_threads;
+        configured_batch_size_ = std::max<std::size_t>(
+            1, std::min<std::size_t>(task_batch_size, kMaxTaskBatch));
+        total_tasks_ = 0;
+        main_tasks_ = 0;
+        worker_tasks_ = 0;
+        total_queue_ns_ = 0;
+        total_exec_ns_ = 0;
+        worker_idle_ns_ = 0;
+        submit_flushes_ = 0;
+        dequeue_batches_ = 0;
+        max_dequeue_batch_ = 0;
+        max_ready_tasks_ = 0;
+        task_profile_count_ = 0;
+        task_profiles_ = {};
+    }
+
+    void reportProfile() {
+        if (!profile_enabled_.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::fprintf(stderr,
+                     "[compiler2026_profile] n=%d b=%d threads=%zu workers=%zu "
+                     "batch=%zu tasks=%llu main_tasks=%llu worker_tasks=%llu "
+                     "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
+                     "queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f\n",
+                     n_, b_, total_threads_, workers_.size(), configured_batch_size_,
+                     static_cast<unsigned long long>(total_tasks_),
+                     static_cast<unsigned long long>(main_tasks_),
+                     static_cast<unsigned long long>(worker_tasks_),
+                     static_cast<unsigned long long>(submit_flushes_),
+                     static_cast<unsigned long long>(dequeue_batches_),
+                     max_dequeue_batch_, max_ready_tasks_,
+                     static_cast<double>(total_queue_ns_) / 1000000.0,
+                     static_cast<double>(total_exec_ns_) / 1000000.0,
+                     static_cast<double>(worker_idle_ns_) / 1000000.0);
+
+        for (std::size_t i = 0; i < task_profile_count_; ++i) {
+            const TaskProfile &profile = task_profiles_[i];
+            const char *name = (profile.name != nullptr) ? profile.name : "unknown";
+            std::fprintf(stderr,
+                         "[compiler2026_profile_task] name=%s count=%llu "
+                         "queue_ms=%.3f exec_ms=%.3f\n",
+                         name, static_cast<unsigned long long>(profile.count),
+                         static_cast<double>(profile.queue_ns) / 1000000.0,
+                         static_cast<double>(profile.exec_ns) / 1000000.0);
+        }
+    }
+
     std::vector<std::thread> workers_;
     std::vector<Task> tasks_;
+    std::array<Task, kMaxTaskBatch> pending_tasks_{};
     std::size_t task_head_ = 0;
+    std::size_t pending_count_ = 0;
+    std::size_t task_batch_size_ = 1;
     std::mutex mutex_;
     std::condition_variable work_cv_;
     std::condition_variable done_cv_;
@@ -191,6 +435,23 @@ private:
     std::size_t active_tasks_ = 0;
     bool stopping_ = false;
     std::exception_ptr worker_error_;
+    std::atomic<bool> profile_enabled_{false};
+    int n_ = 0;
+    int b_ = 0;
+    std::size_t total_threads_ = 1;
+    std::size_t configured_batch_size_ = 1;
+    std::uint64_t total_tasks_ = 0;
+    std::uint64_t main_tasks_ = 0;
+    std::uint64_t worker_tasks_ = 0;
+    std::uint64_t total_queue_ns_ = 0;
+    std::uint64_t total_exec_ns_ = 0;
+    std::uint64_t worker_idle_ns_ = 0;
+    std::uint64_t submit_flushes_ = 0;
+    std::uint64_t dequeue_batches_ = 0;
+    std::size_t max_dequeue_batch_ = 0;
+    std::size_t max_ready_tasks_ = 0;
+    std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
+    std::size_t task_profile_count_ = 0;
 };
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;
@@ -244,6 +505,36 @@ std::size_t reserveTaskCount(int n, int b) {
     return trailing * (trailing + 1) / 2;
 }
 
+std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
+    if (worker_threads == 0 || n <= 0 || b <= 0) {
+        return 1;
+    }
+
+    if (const char *env = std::getenv("COMPILER2026_TASK_BATCH")) {
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            return std::min<std::size_t>(configured, kMaxTaskBatch);
+        }
+    }
+
+    const int block_count = n / b;
+    if (block_count <= 1) {
+        return 1;
+    }
+
+    if (b <= 32) {
+        return 16;
+    }
+    if (b <= 64) {
+        return 8;
+    }
+    if (b <= 128) {
+        return 4;
+    }
+    return 1;
+}
+
 AsyncRuntime &activeRuntime() {
     if (!runtime) {
         runtime = std::make_unique<AsyncRuntime>(std::thread::hardware_concurrency());
@@ -257,12 +548,17 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
     const std::size_t total_threads = (b < asyncMinBlockSize()) ? 1 : resolveThreadCount(n, b);
     const std::size_t worker_threads = (total_threads > 1) ? (total_threads - 1) : 0;
     const std::size_t reserve_tasks = reserveTaskCount(n, b);
+    const std::size_t task_batch_size = selectTaskBatchSize(n, b, worker_threads);
     if (!runtime || runtime->workerCount() != worker_threads) {
         runtime = std::make_unique<AsyncRuntime>(worker_threads);
-        runtime->resetForCall(reserve_tasks);
+        runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads);
         return;
     }
-    runtime->resetForCall(reserve_tasks);
+    runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads);
+}
+
+extern "C" void compiler2026_runtime_register_task(TaskFn fn, const char *name) {
+    activeRuntime().registerTask(fn, name);
 }
 
 extern "C" void *compiler2026_runtime_alloc(std::size_t size) {
@@ -279,6 +575,6 @@ extern "C" void compiler2026_runtime_wait() {
 
 extern "C" void compiler2026_runtime_end() {
     if (runtime) {
-        runtime->resetForCall();
+        runtime->finishCall();
     }
 }

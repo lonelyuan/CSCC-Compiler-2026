@@ -89,6 +89,7 @@ Pass 根据 `LoopInfo` 插入同步：
 - `trsm` 所在 loop 的 exit block 插入 `compiler2026_runtime_wait()`。
 - `madd` 所在内层 loop 的父 loop exit block 插入 `compiler2026_runtime_wait()`，使同一 panel 的 `madd` 任务完成后再进入下一 panel。
 - 函数 async path 入口插入 `compiler2026_runtime_begin(n, b)`。
+- 函数 async path 入口注册 `compiler2026_task_trsm/madd` 的 profile 名称；该注册只提供观测标签，不改变调度语义。
 - async path 返回前插入 `compiler2026_runtime_end()`。
 
 优化后的 IR 仍保留原始 `block_cholesky` 的串行循环结构，并额外生成 async clone。检查命令：
@@ -127,6 +128,7 @@ Runtime API：
 
 ```c
 extern "C" void compiler2026_runtime_begin(int n, int b);
+extern "C" void compiler2026_runtime_register_task(void (*fn)(void *), const char *name);
 extern "C" void *compiler2026_runtime_alloc(std::size_t size);
 extern "C" void compiler2026_runtime_submit(void (*fn)(void *), void *ctx);
 extern "C" void compiler2026_runtime_wait();
@@ -142,8 +144,11 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
+- runtime 根据 `b` 选择小批量提交和批量出队策略：`b <= 32` 使用更大的批量，`b > 128` 保持单任务粒度。
+- `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
+- `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出任务数、队列等待时间、执行时间、worker idle 时间、批量出队信息，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
 
-Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
+Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
 
 ## 正确性保证
 
@@ -164,6 +169,7 @@ Pass 插入的 wait 保证：
 
 - 当前版本仍是 panel-barrier 调度，不是完全异步 DAG。
 - 当前异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`b >= 16` 实验触发过段错误，已回退。
+- 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 
 ## 本地验证
@@ -181,7 +187,7 @@ COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=runtime_submit_dequeue_batch REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 详细性能记录见 `docs/performance.md`。
