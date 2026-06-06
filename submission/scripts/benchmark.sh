@@ -67,7 +67,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -156,6 +156,7 @@ summary_max = {
     "max_batch": 0,
     "max_ready": 0,
     "max_dag_pending": 0,
+    "max_dag_successors": 0,
 }
 summary_ms = {
     "queue_ms": 0.0,
@@ -232,6 +233,7 @@ writer.writerow([
     summary_counts["dag_initial_ready"],
     summary_counts["dag_released"],
     summary_max["max_dag_pending"],
+    summary_max["max_dag_successors"],
     f"{summary_ms['queue_ms']:.3f}",
     f"{summary_ms['exec_ms']:.3f}",
     f"{summary_ms['worker_idle_ms']:.3f}",
@@ -301,6 +303,7 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
             "profile: "
             f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
             f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
+            f"max_dag_successors={max(int(r['max_dag_successors']) for r in task_rows)} "
             f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
             f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f}"
         )
