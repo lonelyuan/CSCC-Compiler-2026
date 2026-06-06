@@ -151,6 +151,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `wait` 等待队列为空且所有运行中任务完成；主线程也会参与执行队列任务。
 - 当前 DAG 作用域是 panel-local；`wait` 确认 DAG 节点全部完成后会清理已完成节点和 latest-producer 表，profile 计数保留到 `end` 汇报。
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
+- ready queue、DAG node vector、latest-producer 表和批量提交状态的 reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 - runtime 按首个 panel 的 `trsm + madd` 任务数预估 panel-local task 容量，并复用 ready queue、DAG node vector 和 latest-producer hash table 的容量。

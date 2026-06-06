@@ -136,7 +136,7 @@ flowchart TD
 
 ## 3. 当前实现采用的保守调度
 
-当前 Pass 还没有恢复完整的块坐标依赖图，因此使用一种正确性优先的 panel-barrier 策略。
+当前 Pass 已经恢复一版基于一维 `GEPOperator` offset 的 block key，并用 runtime ready queue 表达 panel 内 `trsm -> madd` 依赖。跨 panel 依赖仍然保守，进入下一 panel 前保留 barrier。
 
 对每个 panel：
 
@@ -147,13 +147,13 @@ cholesky 同步执行
 提交本 panel 所有 trsm 任务
         |
         v
-wait：等待所有 trsm 完成
-        |
-        v
 提交本 panel 所有 madd 任务
         |
         v
-wait：等待所有 madd 完成
+runtime DAG：每个 madd 等对应 trsm 完成后进入 ready queue
+        |
+        v
+wait：等待 panel-local DAG 全部完成
         |
         v
 进入下一个 panel
@@ -165,12 +165,13 @@ wait：等待所有 madd 完成
 flowchart LR
     C["cholesky(p,p)"]
     T["parallel trsm tasks"]
-    WT["wait trsm"]
-    M["parallel madd tasks"]
-    WM["wait madd"]
+    M["madd tasks blocked by deps"]
+    R["ready-queue release"]
+    WM["wait panel DAG"]
     N["next panel"]
 
-    C --> T --> WT --> M --> WM --> N
+    C --> T --> M --> R --> WM --> N
+    T --> R
 ```
 
 这种方法的优点：
@@ -182,7 +183,7 @@ flowchart LR
 
 缺点：
 
-- `madd` 中只有一小部分结果会影响下一轮 `cholesky`，但当前实现等待所有 `madd` 完成后才进入下一轮。
+- `madd` 中只有一小部分结果会影响下一轮 `cholesky`，但当前实现仍等待所有 `madd` 完成后才进入下一轮。
 - 在 48/64 核平台上，panel barrier 可能导致很多核心等待关键路径。
 - 单个 panel 后期任务变少时，负载均衡会变差。
 
@@ -202,13 +203,13 @@ Pass 保留原始 `block_cholesky` 作为小块串行路径，同时克隆出一
 入口处插入分支：
 
 ```text
-if (b >= 32)
+if (compiler2026_runtime_should_async(n, b))
     return compiler2026_async_impl(A, L, n, b);
 else
     run original serial IR path;
 ```
 
-这么做是因为任务调度有额外开销。`b` 很小时，单个算子计算量太小，并行带来的收益可能不够抵消任务提交、同步和线程调度开销。
+这么做是因为任务调度有额外开销。默认 runtime predicate 使用 `b >= 32`、block 数大于 1 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_DAG_THREADS` 可以用于实验覆盖。
 
 ### 4.2 算子调用 outline
 
@@ -244,18 +245,18 @@ define internal void @compiler2026_task_madd(ptr %ctx) {
 ```llvm
 %ctx = call ptr @compiler2026_runtime_alloc(...)
 store 参数到 %ctx
-call void @compiler2026_runtime_submit(ptr @compiler2026_task_trsm, ptr %ctx)
+call void @compiler2026_runtime_submit_deps(ptr @compiler2026_task_trsm, ptr %ctx, ...)
 ```
 
 含义是：
 
 1. 为当前算子调用保存参数。
-2. 把 task function 指针和参数指针交给 runtime。
-3. runtime 中的 worker 线程稍后执行这个 task。
+2. 把 task function 指针、参数指针和恢复出的 block key 交给 runtime。
+3. runtime 根据 latest producer 关系决定 task 立即进入 ready queue，还是等待前驱 task 完成后释放。
 
 ### 4.4 wait 插入
 
-Pass 使用 `LoopInfo` 找到 `trsm` 和 `madd` 所在循环的出口，在合适的位置插入：
+Pass 使用 `LoopInfo` 找到 `madd` 所在 panel 循环的出口，在合适的位置插入：
 
 ```llvm
 call void @compiler2026_runtime_wait()
@@ -263,8 +264,8 @@ call void @compiler2026_runtime_wait()
 
 这样可以保证：
 
-- 进入 `madd` 阶段前，所有 `trsm` 任务都完成。
 - 进入下一 panel 前，所有 `madd` 任务都完成。
+- 如果某个 `trsm` 的 block key 恢复失败，Pass 会退回普通 submit 并在对应 loop exit 插入保守 wait。
 
 ## 5. Runtime 如何调度任务
 
@@ -298,7 +299,8 @@ void compiler2026_runtime_end();
 - thread-local worker 池复用，避免每个矩阵反复创建线程。
 - task context 使用 arena 分配，避免每个任务单独 `malloc/free`。
 - `wait()` 时主线程也参与执行任务，减少主线程空等。
-- 使用可复用 vector 队列，并根据矩阵 block 数预留容量。
+- 使用可复用 vector 队列，并根据首个 panel 的 `trsm + madd` 任务数预留 queue、DAG node 和 producer map 容量。
+- queue/DAG reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销。
 - 可选输出 task 数、队列等待、执行时间、worker idle、DAG 节点/边/释放等 profile 指标。
@@ -340,9 +342,9 @@ flowchart TD
 ```text
 cholesky 完成
 => 提交所有 trsm
-=> wait 等所有 trsm 完成
 => 提交所有 madd
-=> wait 等所有 madd 完成
+=> runtime 根据 trsm producer 释放对应 madd
+=> wait 等所有 panel-local DAG task 完成
 => 进入下一 panel
 ```
 
@@ -352,11 +354,11 @@ cholesky 完成
 - 下一轮 `cholesky` 读取尚未完成的 trailing matrix 更新。
 - 多个任务同时写同一块数据。
 
-更严格地说，当前策略把完整 DAG 压缩成了几个阶段，每个阶段内部并行，阶段之间全局同步。
+更严格地说，当前策略已经把 panel 内 `trsm -> madd` 细化为 ready queue DAG，但跨 panel 仍压缩成全局同步。
 
 ```text
 完整 DAG：更细，潜在并行度更高，分析更复杂
-当前实现：阶段式 DAG，潜在并行度较低，但正确性简单可靠
+当前实现：panel 内 ready queue + panel 间 barrier，潜在并行度仍低于完整 DAG，但正确性边界清晰
 ```
 
 ## 7. 后续优化方向
@@ -366,7 +368,7 @@ cholesky 完成
 当前调度：
 
 ```text
-cholesky(p) -> all trsm(p) -> all madd(p) -> cholesky(p+1)
+cholesky(p) -> submit trsm/madd(p) with deps -> panel wait -> cholesky(p+1)
 ```
 
 更理想的调度：

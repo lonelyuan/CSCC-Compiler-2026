@@ -314,3 +314,27 @@
 - `LABEL=panel_task_reserve_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/panel_task_reserve_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.958934s contestant_total=0.642000s speedup_avg=1.518x speedup_geo=1.493x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5595.2`、`max_dag_successors=35`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 runtime queue reset locking
+
+改动：
+
+- `AsyncRuntime::resetQueue` 在调整 ready queue、DAG node vector、latest-producer 表、pending batch 状态和 worker error 状态前持有 runtime mutex。
+- 同步更新 `docs/optimization_principles.md` 中过期的两阶段 wait 描述，当前状态明确为 panel 内 ready queue DAG、panel 间 barrier。
+- 归档 `queue_reset_lock_smoke.csv`，确认加锁 reset 后 IR submit 计数、async decision 和 DAG profile counters 仍正常。
+
+经验：
+
+- `wait()` 返回只能说明当前任务完成，不能说明 worker 线程不存在。worker 池复用时，清理队列和 DAG 容器仍应遵守同一个 mutex 保护边界。
+- 生命周期修复不改变调度语义，也不能写成性能提升；它的验证重点是 verifier、无死锁、IR 依赖提交路径和 profile 链路保持正常。
+- 原理文档也要跟着实现演进。继续保留“进入 `madd` 前等待全部 `trsm`”的旧说法，会误导后续跨 panel DAG 设计。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.861x`。
+- `LABEL=queue_reset_lock_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/queue_reset_lock_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.968461s contestant_total=0.647668s speedup_avg=1.515x speedup_geo=1.484x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5107.5`、`max_dag_successors=35`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

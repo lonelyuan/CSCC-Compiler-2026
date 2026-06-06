@@ -118,6 +118,7 @@ public:
     }
 
     void resetQueue(std::size_t reserve_tasks, std::size_t task_batch_size) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (reserve_tasks > tasks_.capacity()) {
             tasks_.reserve(reserve_tasks);
         }
