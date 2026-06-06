@@ -673,7 +673,7 @@ std::size_t reserveTaskCount(int n, int b) {
         return 0;
     }
     const std::size_t trailing = static_cast<std::size_t>(block_count - 1);
-    return trailing * (trailing + 1) / 2;
+    return trailing + trailing * (trailing + 1) / 2;
 }
 
 std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {

@@ -291,3 +291,26 @@
 - `LABEL=dag_reserve_structures_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_reserve_structures_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5673.8`、`max_dag_successors=35`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-06 panel task reserve estimate
+
+改动：
+
+- `reserveTaskCount(n, b)` 的容量提示从只估算首个 panel 的 `madd` 数量，修正为 `trsm + madd` 总任务数。
+- ready queue、DAG node vector 和 latest-producer hash table 继续复用同一个容量提示；本轮只修正估算值，不改变调度依赖语义。
+- 归档 `panel_task_reserve_smoke.csv`，确认修正后 IR submit 计数、async decision 和 DAG profile counters 仍正常。
+
+经验：
+
+- panel-local DAG 的最大任务量来自首个 panel：`trsm` 为 `trailing` 个，`madd` 为 `trailing * (trailing + 1) / 2` 个。之前只按 `madd` 数预留，结构会在提交 `trsm` 后仍有额外增长风险。
+- 容量预留不能写成隐含算法事实。它只是 runtime 容器提示，不能成为正确性条件，也不能把 runtime 变成算子专用实现。
+- 结构型微优化仍要用 IR 计数和动态 profile 交叉检查，避免容量改动掩盖依赖提交路径退化。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.833x`。
+- `LABEL=panel_task_reserve_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/panel_task_reserve_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.958934s contestant_total=0.642000s speedup_avg=1.518x speedup_geo=1.493x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5595.2`、`max_dag_successors=35`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
