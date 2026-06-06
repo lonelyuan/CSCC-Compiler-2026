@@ -2,7 +2,9 @@
 
 ## 目标
 
-本提交物通过 LLVM Pass 将官方 baseline 中的 `contest::block_cholesky` 重定向到参赛运行时库，由运行时库构造并执行分块 Cholesky 的 tile-level DAG。运行时库只调度官方 `cholesky`、`trsm`、`madd` 算子，不替换、不重定义、不绕过官方算子。
+本提交物通过 LLVM Pass 在 IR 层分析官方 baseline 中的算子调用和循环结构，将可并行的 `trsm`、`madd` 调用改写为运行时异步任务提交，并在对应 loop exit 插入同步点。官方 `cholesky`、`trsm`、`madd` 算子实现不被重定义、替换或绕过。
+
+当前实现不再使用“直接清空 `block_cholesky` 函数体并替换成 runtime 入口”的方案。那个方案虽然能工作，但过于接近函数级替换，不符合本赛题强调的“LLVM Pass 分析算子依赖关系并插入运行时接口”的方向。
 
 ## Pass 设计
 
@@ -18,27 +20,82 @@ Pass 插件：
 pass/libcontestant_pass.so
 ```
 
-Pass 查找满足以下条件的函数：
+Pass 类型：
+
+```text
+LLVM New Pass Manager FunctionPass
+```
+
+Pass 使用 `LoopAnalysis` 获取 `LoopInfo`，只处理官方 `contest::block_cholesky`：
 
 - 函数名为官方 C++ mangled name `_ZN7contest14block_choleskyEPKdPdii`，或包含 `block_cholesky`。
 - 返回类型为 `i32`。
 - 参数数量为 4。
 
-匹配后，Pass 清空原函数体并生成：
+### IR 版本化
+
+为了避免小 block 场景下任务提交开销超过计算收益，Pass 先克隆一份原始 IR 作为 serial fallback：
 
 ```text
-return compiler2026_block_cholesky_runtime(A, L, n, b);
+compiler2026_serial_fallback(A, L, n, b)
 ```
 
-运行时入口使用 C ABI：
+然后在 `block_cholesky` 入口插入版本化分支：
+
+```text
+if (b < 64)
+    return compiler2026_serial_fallback(A, L, n, b);
+else
+    run optimized IR path;
+```
+
+fallback 是从官方 baseline IR 克隆出来的，不是手写算法替换。
+
+### 算子调用转换
+
+在 optimized path 中：
+
+- `cholesky(...)` 保持同步原始调用。
+- `trsm(...)` 替换为：
 
 ```c
-extern "C" int compiler2026_block_cholesky_runtime(
-    const double *A,
-    double *L,
-    int n,
-    int b
-);
+compiler2026_runtime_submit_trsm(A, L, X, b, lda);
+```
+
+- `madd(...)` 替换为：
+
+```c
+compiler2026_runtime_submit_madd(A, B, C, b, lda);
+```
+
+Pass 根据 `LoopInfo` 插入同步：
+
+- `trsm` 所在 loop 的 exit block 插入 `compiler2026_runtime_wait()`。
+- `madd` 所在内层 loop 的父 loop exit block 插入 `compiler2026_runtime_wait()`，使同一 panel 的 `madd` 任务完成后再进入下一 panel。
+- 函数 optimized path 入口插入 `compiler2026_runtime_begin(n, b)`。
+- optimized path 返回前插入 `compiler2026_runtime_end()`。
+
+优化后的 IR 仍保留原始 `block_cholesky` 的循环结构。检查命令：
+
+```bash
+llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
+  | grep -n "compiler2026_runtime_\\|compiler2026_serial_fallback\\|call.*trsm\\|call.*madd\\|define.*block_cholesky"
+```
+
+已验证 IR 片段包含：
+
+```text
+define dso_local noundef i32 @_ZN7contest14block_choleskyEPKdPdii(...)
+  call i32 @compiler2026_serial_fallback(...)
+  call void @compiler2026_runtime_begin(...)
+  call void @compiler2026_runtime_wait()
+  call void @compiler2026_runtime_submit_trsm(...)
+  call void @compiler2026_runtime_submit_madd(...)
+  call void @compiler2026_runtime_end()
+
+define internal noundef i32 @compiler2026_serial_fallback(...)
+  tail call void @trsm(...)
+  tail call void @madd(...)
 ```
 
 ## Runtime 设计
@@ -49,61 +106,52 @@ Runtime 静态库：
 runtime/libcontestant_runtime.a
 ```
 
-Runtime 负责：
-
-1. 校验输入参数。
-2. 将输入矩阵 `A` 拷贝到输出矩阵 `L`。
-3. 按 block 坐标执行分块 Cholesky。
-4. 使用线程池并行执行同一 panel 内可并行的 `trsm` 和 `madd`。
-5. 清零上三角。
-
-当前调度为 barrier DAG：
-
-```text
-for panel:
-  cholesky(panel, panel)
-  parallel trsm(row, panel)
-  parallel madd(row, col, panel)
-clear upper triangle
-```
-
-依赖关系：
-
-- `trsm(row, panel)` 依赖 `cholesky(panel, panel)`。
-- `madd(row, col, panel)` 依赖 `trsm(row, panel)` 和 `trsm(col, panel)`。
-- 下一轮 `cholesky(panel + 1, panel + 1)` 依赖上一轮所有更新该对角块的 `madd`。
-
-该调度比完全异步 DAG 保守，但语义清晰，便于正确性验证，是后续细粒度 DAG 优化的基础版本。
-
-## 并行参数
-
-线程数通过环境变量配置：
-
-```bash
-COMPILER2026_DAG_THREADS=4
-```
-
-若未设置，则使用 `std::thread::hardware_concurrency()`。
-
-该环境变量用于本地调试和调参。正式提交不依赖源码标注传递平台特定参数。
-
-## 正确性保证
-
-Runtime 使用与官方 baseline 相同的数据布局和算子调用：
+Runtime API：
 
 ```c
-void cholesky(double *A, double *L, int b, int lda);
+extern "C" void compiler2026_runtime_begin(int n, int b);
+extern "C" void compiler2026_runtime_submit_trsm(double *A, double *L, double *X, int b, int lda);
+extern "C" void compiler2026_runtime_submit_madd(double *A, double *B, double *C, int b, int lda);
+extern "C" void compiler2026_runtime_wait();
+extern "C" void compiler2026_runtime_end();
+```
+
+Runtime 内部维护一个 thread-local `AsyncRuntime`：
+
+- `submit_trsm` / `submit_madd` 将算子调用封装为任务放入队列。
+- worker 线程从队列中取任务并调用官方算子 ABI。
+- `wait` 等待队列为空且所有运行中任务完成。
+- `end` 做最终等待并释放运行时上下文。
+
+Runtime 只调用官方 ABI：
+
+```c
 void trsm(double *A, double *L, double *X, int b, int lda);
 void madd(double *A, double *B, double *C, int b, int lda);
 ```
 
-每个 `madd` 任务写入唯一的 `(row, col)` block。同一 panel 的 `madd` 任务之间没有写写冲突。panel 间通过 barrier 保证依赖顺序。
+`cholesky` 由优化后的 IR 保持原始同步调用，因此无需 runtime 包装。
+
+## 正确性保证
+
+分块 Cholesky 的依赖关系：
+
+- `trsm(row, panel)` 依赖当前 panel 的 `cholesky(panel, panel)`。
+- `madd(row, col, panel)` 依赖对应的 `trsm(row, panel)` 和 `trsm(col, panel)`。
+- 下一 panel 的 `cholesky` 依赖前一 panel 的相关 `madd` 更新完成。
+
+Pass 插入的 wait 保证：
+
+- 所有 `trsm` 任务完成后才进入 `madd` 阶段。
+- 所有 `madd` 任务完成后才进入下一 panel。
+
+该策略是保守的 panel-barrier DAG，正确性优先。后续可以继续把 barrier 细化为真正的 ready-queue DAG。
 
 ## 当前限制
 
-- 当前 runtime 要求 `n % b == 0`，与 SDK 当前公开 scaffold 一致。
-- 当前版本为 panel barrier 调度，不是完全异步 DAG。
-- 当前版本未做绑核、NUMA、任务合并等性能优化。
+- 当前版本仍是 panel-barrier 调度，不是完全异步 DAG。
+- 当前异步阈值 `b >= 64` 是 Pass 中的保守常量，后续可改成更系统的 profile-guided 或 runtime heuristic。
+- 小 block fallback 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支/函数调用开销。
 
 ## 本地验证
 
@@ -115,31 +163,13 @@ cd /root/bisheng
 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh
 ```
 
-脚本会：
+完整 benchmark：
 
-1. 构建 Pass 和 runtime。
-2. 将官方 baseline 编译为 LLVM bitcode。
-3. 使用 `opt -passes=contestant-pass` 应用 Pass。
-4. 链接 runtime 和公开基础算子源码。
-5. 生成测试矩阵。
-6. 运行串行 baseline 和 contestant app。
-7. 使用 verifier 校验两份输出。
-8. 输出性能对比。
-
-当前已验证结果：
-
-```text
-SPEC_START=43 SPEC_END=56 COMPILER2026_DAG_THREADS=4
-serial_seconds=0.080102832
-contestant_seconds=0.070966918
-speedup=1.129x
-
-SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4
-serial_seconds=0.275685036
-contestant_seconds=0.149214601
-speedup=1.848x
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+LABEL=ir_loop_pass_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
-上述两组测试的串行 baseline 输出和 contestant app 输出均通过 verifier。
+详细性能记录见 `docs/performance.md`。
 
-更新后的详细性能记录见 `docs/performance.md`。当前优化版本在 `n1024` 公开子集上达到约 `2.171x` 平均加速，在 `n1152_small_b` 子集上达到约 `2.065x` 平均加速。

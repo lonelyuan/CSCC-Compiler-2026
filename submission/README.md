@@ -29,7 +29,7 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=after_madd_coarsening REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=ir_loop_pass_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 Package artifacts:
@@ -42,9 +42,9 @@ cd /root/bisheng
 
 Current implementation:
 
-- The pass replaces the official `contest::block_cholesky` body with a call to
-  `compiler2026_block_cholesky_runtime`.
-- The runtime preserves the official algorithm semantics, calls the official
-  `cholesky`, `trsm`, and `madd` ABI, and schedules tile-level work with panel
-  barriers.
+- The pass analyzes the official `contest::block_cholesky` IR with LoopInfo.
+- It keeps `cholesky` synchronous, replaces optimized-path `trsm` and `madd`
+  calls with runtime task submissions, and inserts waits at loop exits.
+- It clones the original IR as a serial fallback for small block sizes.
+- The runtime calls the official `trsm` and `madd` ABI from worker threads.
 - No source annotations are required.

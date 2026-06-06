@@ -1,37 +1,37 @@
 #include <algorithm>
-#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
-#include <utility>
 #include <vector>
 
 extern "C" {
-void cholesky(double *A, double *L, int b, int lda);
 void trsm(double *A, double *L, double *X, int b, int lda);
 void madd(double *A, double *B, double *C, int b, int lda);
 }
 
 namespace {
 
-class WorkerTeam {
+class AsyncRuntime {
 public:
-    explicit WorkerTeam(std::size_t thread_count) : thread_count_(std::max<std::size_t>(1, thread_count)) {
-        if (thread_count_ == 1) {
+    explicit AsyncRuntime(std::size_t worker_count) {
+        if (worker_count <= 1) {
             return;
         }
-        workers_.reserve(thread_count_);
-        for (std::size_t i = 0; i < thread_count_; ++i) {
-            workers_.emplace_back([this, i]() { workerLoop(i); });
+        workers_.reserve(worker_count);
+        for (std::size_t i = 0; i < worker_count; ++i) {
+            workers_.emplace_back([this]() { workerLoop(); });
         }
     }
 
-    ~WorkerTeam() {
+    ~AsyncRuntime() {
+        wait();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
@@ -42,107 +42,83 @@ public:
         }
     }
 
-    void run(std::size_t count, std::function<void(std::size_t)> task) {
-        if (count == 0) {
-            return;
-        }
-        if (thread_count_ == 1 || count == 1) {
-            for (std::size_t i = 0; i < count; ++i) {
-                task(i);
-            }
+    void submit(std::function<void()> task) {
+        if (workers_.empty()) {
+            task();
             return;
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            task_ = std::move(task);
-            total_ = count;
-            active_workers_ = std::min(thread_count_, count);
-            chunk_size_ = std::max<std::size_t>(
-                1, (count + active_workers_ * 8 - 1) / (active_workers_ * 8));
-            next_.store(0, std::memory_order_relaxed);
-            remaining_workers_.store(thread_count_, std::memory_order_relaxed);
-            worker_error_ = nullptr;
-            ++generation_;
+            tasks_.push_back(std::move(task));
+        }
+        work_cv_.notify_one();
+    }
+
+    void wait() {
+        if (workers_.empty()) {
+            return;
         }
 
-        work_cv_.notify_all();
-
         std::unique_lock<std::mutex> lock(mutex_);
-        const std::size_t target_generation = generation_;
-        done_cv_.wait(lock, [this, target_generation]() {
-            return finished_generation_ >= target_generation;
+        done_cv_.wait(lock, [this]() {
+            return tasks_.empty() && active_tasks_ == 0;
         });
+
         if (worker_error_) {
-            std::rethrow_exception(worker_error_);
+            std::exception_ptr error = worker_error_;
+            worker_error_ = nullptr;
+            std::rethrow_exception(error);
         }
     }
 
 private:
-    void workerLoop(std::size_t worker_id) {
-        std::size_t observed_generation = 0;
+    void workerLoop() {
         while (true) {
+            std::function<void()> task;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                work_cv_.wait(lock, [this, observed_generation]() {
-                    return stopping_ || generation_ != observed_generation;
-                });
-                if (stopping_) {
+                work_cv_.wait(lock, [this]() { return stopping_ || !tasks_.empty(); });
+                if (stopping_ && tasks_.empty()) {
                     return;
                 }
-                observed_generation = generation_;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+                ++active_tasks_;
             }
 
-            if (worker_id < active_workers_) {
-                try {
-                    while (true) {
-                        const std::size_t begin =
-                            next_.fetch_add(chunk_size_, std::memory_order_relaxed);
-                        if (begin >= total_) {
-                            break;
-                        }
-                        const std::size_t end = std::min(total_, begin + chunk_size_);
-                        for (std::size_t index = begin; index < end; ++index) {
-                            task_(index);
-                        }
-                    }
-                } catch (...) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (!worker_error_) {
-                        worker_error_ = std::current_exception();
-                    }
-                    next_.store(total_, std::memory_order_relaxed);
+            try {
+                task();
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!worker_error_) {
+                    worker_error_ = std::current_exception();
                 }
             }
 
-            if (remaining_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    finished_generation_ = observed_generation;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                --active_tasks_;
+                if (tasks_.empty() && active_tasks_ == 0) {
+                    done_cv_.notify_all();
                 }
-                done_cv_.notify_one();
             }
         }
     }
 
-    std::size_t thread_count_;
     std::vector<std::thread> workers_;
+    std::deque<std::function<void()>> tasks_;
     std::mutex mutex_;
     std::condition_variable work_cv_;
     std::condition_variable done_cv_;
-    std::function<void(std::size_t)> task_;
-    std::atomic<std::size_t> next_{0};
-    std::atomic<std::size_t> remaining_workers_{0};
-    std::size_t total_ = 0;
-    std::size_t active_workers_ = 0;
-    std::size_t chunk_size_ = 1;
-    std::size_t generation_ = 0;
-    std::size_t finished_generation_ = 0;
+    std::size_t active_tasks_ = 0;
     bool stopping_ = false;
     std::exception_ptr worker_error_;
 };
 
-std::size_t resolveThreadCount(int block_count) {
+thread_local std::unique_ptr<AsyncRuntime> runtime;
+
+std::size_t resolveThreadCount(int n, int b) {
     std::size_t threads = std::thread::hardware_concurrency();
     if (threads == 0) {
         threads = 1;
@@ -156,97 +132,68 @@ std::size_t resolveThreadCount(int block_count) {
         }
     }
 
+    if (n <= 0 || b <= 0) {
+        return 1;
+    }
+
+    const int block_count = n / b;
     if (block_count <= 1) {
         return 1;
     }
     return std::max<std::size_t>(1, std::min<std::size_t>(threads, block_count));
 }
 
-inline double *blockPtr(double *matrix, int n, int b, int block_row, int block_col) {
-    return &matrix[static_cast<std::size_t>(block_row * b) * n + block_col * b];
+AsyncRuntime &activeRuntime() {
+    if (!runtime) {
+        runtime = std::make_unique<AsyncRuntime>(std::thread::hardware_concurrency());
+    }
+    return *runtime;
 }
 
-void clearUpperTriangle(double *L, int n, WorkerTeam &team) {
-    team.run(static_cast<std::size_t>(n), [&](std::size_t row_index) {
-        const int row = static_cast<int>(row_index);
-        for (int col = row + 1; col < n; ++col) {
-            L[static_cast<std::size_t>(row) * n + col] = 0.0;
-        }
-    });
-}
-
-int runBlockCholeskyDag(const double *A, double *L, int n, int b) {
-    if (A == nullptr || L == nullptr) {
-        throw std::invalid_argument("A and L must be non-null");
-    }
-    if (n <= 0 || b <= 0) {
-        throw std::invalid_argument("n and b must be positive");
-    }
-    if (n % b != 0) {
-        throw std::invalid_argument("Current runtime requires n to be divisible by b");
-    }
-
-    const int block_count = n / b;
-    WorkerTeam team(resolveThreadCount(block_count));
-
-    team.run(static_cast<std::size_t>(n), [&](std::size_t row_index) {
-        const std::size_t row = row_index * static_cast<std::size_t>(n);
-        std::copy(A + row, A + row + n, L + row);
-    });
-
-    std::vector<std::pair<int, int>> updates;
-
-    for (int panel = 0; panel < block_count; ++panel) {
-        cholesky(blockPtr(L, n, b, panel, panel), blockPtr(L, n, b, panel, panel), b, n);
-
-        const int trailing = block_count - panel - 1;
-        team.run(static_cast<std::size_t>(trailing), [&](std::size_t task_index) {
-            const int row_block = panel + 1 + static_cast<int>(task_index);
-            trsm(blockPtr(L, n, b, row_block, panel),
-                 blockPtr(L, n, b, panel, panel),
-                 blockPtr(L, n, b, row_block, panel),
-                 b, n);
-        });
-
-        if (b <= 32) {
-            team.run(static_cast<std::size_t>(trailing), [&](std::size_t task_index) {
-                const int col_block = panel + 1 + static_cast<int>(task_index);
-                for (int row_block = col_block; row_block < block_count; ++row_block) {
-                    madd(blockPtr(L, n, b, row_block, panel),
-                         blockPtr(L, n, b, col_block, panel),
-                         blockPtr(L, n, b, row_block, col_block),
-                         b, n);
-                }
-            });
-        } else {
-            updates.clear();
-            updates.reserve(static_cast<std::size_t>(trailing) * (trailing + 1) / 2);
-            for (int col_block = panel + 1; col_block < block_count; ++col_block) {
-                for (int row_block = col_block; row_block < block_count; ++row_block) {
-                    updates.emplace_back(row_block, col_block);
-                }
-            }
-
-            team.run(updates.size(), [&](std::size_t task_index) {
-                const auto [row_block, col_block] = updates[task_index];
-                madd(blockPtr(L, n, b, row_block, panel),
-                     blockPtr(L, n, b, col_block, panel),
-                     blockPtr(L, n, b, row_block, col_block),
-                     b, n);
-            });
+int asyncMinBlockSize() {
+    int threshold = 64;
+    if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
+        char *end = nullptr;
+        const long configured = std::strtol(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            threshold = static_cast<int>(configured);
         }
     }
-
-    clearUpperTriangle(L, n, team);
-    return 0;
+    return threshold;
 }
 
 }  // namespace
 
-extern "C" int compiler2026_block_cholesky_runtime(const double *A, double *L, int n, int b) {
-    try {
-        return runBlockCholeskyDag(A, L, n, b);
-    } catch (...) {
-        return -1;
+extern "C" void compiler2026_runtime_begin(int n, int b) {
+    const std::size_t threads = (b < asyncMinBlockSize()) ? 1 : resolveThreadCount(n, b);
+    runtime = std::make_unique<AsyncRuntime>(threads);
+}
+
+extern "C" void compiler2026_runtime_submit_trsm(double *A, double *L, double *X, int b,
+                                                  int lda) {
+    if (b < asyncMinBlockSize()) {
+        trsm(A, L, X, b, lda);
+        return;
+    }
+    activeRuntime().submit([=]() { trsm(A, L, X, b, lda); });
+}
+
+extern "C" void compiler2026_runtime_submit_madd(double *A, double *B, double *C, int b,
+                                                  int lda) {
+    if (b < asyncMinBlockSize()) {
+        madd(A, B, C, b, lda);
+        return;
+    }
+    activeRuntime().submit([=]() { madd(A, B, C, b, lda); });
+}
+
+extern "C" void compiler2026_runtime_wait() {
+    activeRuntime().wait();
+}
+
+extern "C" void compiler2026_runtime_end() {
+    if (runtime) {
+        runtime->wait();
+        runtime.reset();
     }
 }
