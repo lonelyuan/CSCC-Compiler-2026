@@ -144,6 +144,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。
 - worker 线程从队列中取任务，调用 Pass 生成的 task function。
 - `wait` 等待队列为空且所有运行中任务完成；主线程也会参与执行队列任务。
+- 当前 DAG 作用域是 panel-local；`wait` 确认 DAG 节点全部完成后会清理已完成节点和 latest-producer 表，profile 计数保留到 `end` 汇报。
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。

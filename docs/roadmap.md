@@ -59,7 +59,7 @@ cholesky(p+1) depends only on updates to block (p+1, p+1)
 trsm(r, p+1) depends on updates to block (r, p+1)
 ```
 
-当前实现已经去掉 `trsm` 阶段全局 wait，让 `madd` 在对应两个 `trsm` 完成后进入 ready queue。下一步才是让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成；这是大核数平台上最重要的性能空间。
+当前实现已经去掉 `trsm` 阶段全局 wait，让 `madd` 在对应两个 `trsm` 完成后进入 ready queue；panel barrier 完成后 runtime 会清理 panel-local DAG 状态，避免旧 producer 表跨 panel 残留。下一步才是让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成；这是大核数平台上最重要的性能空间。
 
 ### 3. 运行时任务粒度自适应
 

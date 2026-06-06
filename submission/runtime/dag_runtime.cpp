@@ -268,6 +268,7 @@ public:
                     batch_count = takeReadyTasksLocked(batch.data());
                 } else if (active_tasks_ == 0) {
                     if (pending_dag_tasks_ == 0) {
+                        clearCompletedDagStateLocked();
                         break;
                     }
                     dag_deadlock = true;
@@ -414,6 +415,12 @@ private:
             }
         }
         return released;
+    }
+
+    void clearCompletedDagStateLocked() {
+        dag_nodes_.clear();
+        latest_producer_.clear();
+        pending_dag_tasks_ = 0;
     }
 
     std::size_t chooseBatchCount(std::size_t available) const {
