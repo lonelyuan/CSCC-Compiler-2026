@@ -7,7 +7,7 @@
 当前交付版本是 `ir_async_threshold32`：
 
 ```text
-submission/docs/benchmark_results/ir_async_threshold32.csv
+docs/benchmark_results/ir_async_threshold32.csv
 ```
 
 VM 原始输出：
@@ -64,11 +64,11 @@ LABEL=pass_runtime_threshold32 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/
 仓库中还保留了以下 CSV：
 
 ```text
-submission/docs/benchmark_results/before_runtime_opt.csv
-submission/docs/benchmark_results/after_runtime_opt.csv
-submission/docs/benchmark_results/after_madd_coarsening.csv
-submission/docs/benchmark_results/ir_loop_pass_final.csv
-submission/docs/benchmark_results/ir_outlined_task_pass.csv
+docs/benchmark_results/before_runtime_opt.csv
+docs/benchmark_results/after_runtime_opt.csv
+docs/benchmark_results/after_madd_coarsening.csv
+docs/benchmark_results/ir_loop_pass_final.csv
+docs/benchmark_results/ir_outlined_task_pass.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。

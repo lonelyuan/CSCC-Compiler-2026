@@ -62,8 +62,10 @@ Current implementation:
 
 Documentation:
 
-- `docs/design.md`: implementation-level design.
-- `docs/performance.md`: benchmark results.
-- `docs/optimization_principles.md`: beginner-friendly explanation of
+- Repository docs live under `../docs/`.
+- Packaged archive docs are copied to `docs/` at archive root.
+- `design.md`: implementation-level design.
+- `performance.md`: benchmark results.
+- `optimization_principles.md`: beginner-friendly explanation of
   parallelization and operator DAG scheduling.
-- `docs/roadmap.md`: longer-term scaling notes.
+- `roadmap.md`: longer-term scaling notes.
