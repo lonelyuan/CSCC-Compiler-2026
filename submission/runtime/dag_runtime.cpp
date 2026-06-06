@@ -719,11 +719,38 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
 }
 
 extern "C" int compiler2026_runtime_should_async(int n, int b) {
-    if (n <= 0 || b <= 0 || b < asyncMinBlockSize()) {
-        return 0;
+    const int threshold = asyncMinBlockSize();
+    std::size_t total_threads = 1;
+    int block_count = 0;
+    bool enabled = false;
+    const char *reason = "invalid";
+
+    if (n > 0 && b > 0) {
+        block_count = n / b;
+        if (b < threshold) {
+            reason = "small_b";
+        } else if (block_count <= 1) {
+            reason = "single_block";
+        } else {
+            total_threads = resolveThreadCount(n, b);
+            if (total_threads > 1) {
+                enabled = true;
+                reason = "enabled";
+            } else {
+                reason = "threads";
+            }
+        }
     }
 
-    return (resolveThreadCount(n, b) > 1) ? 1 : 0;
+    if (profileEnabledFromEnv()) {
+        std::fprintf(stderr,
+                     "[compiler2026_async_decision] n=%d b=%d block_count=%d "
+                     "threshold=%d threads=%zu enabled=%d reason=%s\n",
+                     n, b, block_count, threshold, total_threads, enabled ? 1 : 0,
+                     reason);
+    }
+
+    return enabled ? 1 : 0;
 }
 
 extern "C" void compiler2026_runtime_register_task(TaskFn fn, const char *name) {

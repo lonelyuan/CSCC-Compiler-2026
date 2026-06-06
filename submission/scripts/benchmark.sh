@@ -67,7 +67,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -133,6 +133,14 @@ contestant = float(open(contestant_path).read())
 speedup = serial / contestant if contestant > 0 else float("inf")
 
 profile_calls = 0
+async_decisions = 0
+async_enabled = 0
+async_disabled = 0
+async_disabled_reasons = {
+    "small_b": 0,
+    "threads": 0,
+    "single_block": 0,
+}
 summary_counts = {
     "tasks": 0,
     "main_tasks": 0,
@@ -166,7 +174,17 @@ except FileNotFoundError:
     lines = []
 
 for line in lines:
-    if line.startswith("[compiler2026_profile] "):
+    if line.startswith("[compiler2026_async_decision] "):
+        async_decisions += 1
+        values = dict(pair_re.findall(line))
+        if values.get("enabled") == "1":
+            async_enabled += 1
+        else:
+            async_disabled += 1
+            reason = values.get("reason")
+            if reason in async_disabled_reasons:
+                async_disabled_reasons[reason] += 1
+    elif line.startswith("[compiler2026_profile] "):
         profile_calls += 1
         values = dict(pair_re.findall(line))
         for key in summary_counts:
@@ -192,6 +210,12 @@ writer.writerow([
     task_batch,
     async_min_b,
     "1" if profile_enabled not in ("", "0") else "0",
+    async_decisions,
+    async_enabled,
+    async_disabled,
+    async_disabled_reasons["small_b"],
+    async_disabled_reasons["threads"],
+    async_disabled_reasons["single_block"],
     f"{serial:.9f}",
     f"{contestant:.9f}",
     f"{speedup:.6f}",
@@ -242,6 +266,16 @@ for suite in sorted({r["suite"] for r in rows}):
         f"speedup_avg={statistics.mean(vals):.3f}x"
     )
 if rows and any(r.get("profile_enabled") == "1" for r in rows):
+    decision_rows = [r for r in rows if int(r.get("async_decisions") or 0) > 0]
+    if decision_rows:
+        print(
+            "async_decisions: "
+            f"enabled={sum(int(r['async_enabled']) for r in decision_rows)} "
+            f"disabled={sum(int(r['async_disabled']) for r in decision_rows)} "
+            f"small_b={sum(int(r['async_disabled_small_b']) for r in decision_rows)} "
+            f"threads={sum(int(r['async_disabled_threads']) for r in decision_rows)} "
+            f"single_block={sum(int(r['async_disabled_single_block']) for r in decision_rows)}"
+        )
     task_rows = [r for r in rows if int(r.get("total_tasks") or 0) > 0]
     if task_rows:
         print(

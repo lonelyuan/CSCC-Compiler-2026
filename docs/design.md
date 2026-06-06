@@ -155,7 +155,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 - runtime 根据 `b` 选择小批量提交和批量出队策略：`b <= 32` 使用更大的批量，`b > 128` 保持单任务粒度。
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
-- `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出任务数、队列等待时间、执行时间、worker idle 时间、批量出队信息、DAG 节点/边/释放统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
+- `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出 async path 判定次数和原因、任务数、队列等待时间、执行时间、worker idle 时间、批量出队信息、DAG 节点/边/释放统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
 - benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV。
 
 Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；ready-queue DAG 只看整数 block key 的 producer/consumer 关系。实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。

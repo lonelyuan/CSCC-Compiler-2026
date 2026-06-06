@@ -1,0 +1,5 @@
+label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_initial_ready,dag_released,max_dag_pending,queue_ms,exec_ms,worker_idle_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms
+async_decision_threads1_smoke,n512_576,1,1,auto,32,1,14,0,14,8,6,0,0.089437439,0.090365138,0.989734,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_decision_threads1_smoke,n768,1,1,auto,32,1,11,0,11,4,7,0,0.230345657,0.225727238,1.020460,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_decision_threads1_smoke,n1024,1,1,auto,32,1,6,0,6,2,4,0,0.309321535,0.308690441,1.002044,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
+async_decision_threads1_smoke,n1152_small_b,1,1,auto,32,1,8,0,8,6,2,0,0.357636134,0.365635349,0.978122,0,0,0,0,0,0,0,0,0,0,0,0,0,0.000,0.000,0.000,0,0.000,0.000,0,0.000,0.000
