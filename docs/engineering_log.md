@@ -684,3 +684,29 @@
 - `threads=4` 为 `runs=4 serial_total=0.977226s contestant_total=0.685154s speedup_avg=1.453x speedup_geo=1.412x`，async decision 为 `enabled=19 disabled=20 small_b=20 small_blocks=0 threads_disabled=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_per_thread_avg=20.368`、`dag_missing_deps=0`、`wait_dag_live_avg=89.156`、`max_wait_dag_live=496`。
 - `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.815x`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-08 default task batch 8
+
+改动：
+
+- `selectTaskBatchSize` 将 `b <= 32` 的默认批量上限从 `16` 收窄到 `8`；`b <= 64` 原本也是 `8`，因此当前小/中等 block 的默认上限统一为 `8`。
+- `COMPILER2026_TASK_BATCH` 覆盖能力保留，真实多核平台仍可继续调参。
+- 同步更新设计、性能、路线图、原理文档和 README，并归档 `batch8_default_repeat3.csv` / `batch8_default_profile_smoke.csv`。
+
+经验：
+
+- 现有 profile/benchmark 基础设施已经足够支撑这类默认策略调整：可以同时检查 repeat=3 时间、IR call site、runtime batch 实际值和 verifier，不需要继续增加 profile 字段。
+- 当前 VM 上重新对比：默认旧策略 repeat=3 为 `speedup_geo=1.478x`、contestant total `1.990378s`；`COMPILER2026_TASK_BATCH=8` 为 `speedup_geo=1.512x`、contestant total `1.971658s`；`COMPILER2026_TASK_BATCH=4` 为 `speedup_geo=1.497x`、contestant total `2.005406s`。
+- 收窄到 `8` 后默认 repeat=3 为 `speedup_geo=1.515x`、contestant total `2.002821s`。该数值与不同 run 的 serial 波动有关，保留 total 和 geo 两个判据；结论是 batch 8 至少优于本轮旧默认和 batch 4，不再把 `16` 作为默认。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `LABEL=batch_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在改动前 VM 通过，旧默认 summary 为 `runs=12 serial_total=2.927189s contestant_total=1.990378s speedup_avg=1.507x speedup_geo=1.478x`。
+- `LABEL=batch8_repeat3_current REPEAT=3 COMPILER2026_DAG_THREADS=4 COMPILER2026_TASK_BATCH=8 ./submission/scripts/benchmark.sh` 在改动前 VM 通过，summary 为 `runs=12 serial_total=2.976853s contestant_total=1.971658s speedup_avg=1.539x speedup_geo=1.512x`。
+- `LABEL=batch4_repeat3_current REPEAT=3 COMPILER2026_DAG_THREADS=4 COMPILER2026_TASK_BATCH=4 ./submission/scripts/benchmark.sh` 在改动前 VM 通过，summary 为 `runs=12 serial_total=2.982709s contestant_total=2.005406s speedup_avg=1.526x speedup_geo=1.497x`。
+- `LABEL=batch8_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在改动后 VM 通过，归档为 `docs/benchmark_results/batch8_default_repeat3.csv`；summary 为 `runs=12 serial_total=3.026025s contestant_total=2.002821s speedup_avg=1.547x speedup_geo=1.515x`，IR 计数仍为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`。
+- `LABEL=batch8_default_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/batch8_default_profile_smoke.csv`；summary 包含 `runtime_batch_max=8`、`dag_missing_deps=0`、`wait_dag_live_avg=89.219`。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.831x`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

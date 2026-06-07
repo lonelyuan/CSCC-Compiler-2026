@@ -32,6 +32,9 @@ cd /root/bisheng
 LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
+The current default auto batch uses an upper bound of `8` for `b <= 64`;
+`COMPILER2026_TASK_BATCH` can still override it for platform tuning.
+
 Sweep multiple runtime thread counts in one CSV:
 
 ```bash

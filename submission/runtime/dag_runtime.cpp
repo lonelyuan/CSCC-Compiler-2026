@@ -811,7 +811,7 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
 
     std::size_t batch = 1;
     if (b <= 32) {
-        batch = 16;
+        batch = 8;
     } else if (b <= 64) {
         batch = 8;
     } else if (b <= 128) {

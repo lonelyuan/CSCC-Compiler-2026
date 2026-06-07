@@ -304,7 +304,7 @@ void compiler2026_runtime_end();
 - 使用可复用 vector 队列，并根据首个 panel 的 `trsm + madd` 任务数预留 queue、DAG node 和 producer map 容量。
 - queue/DAG reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - 减少大量任务提交时的重复唤醒。
-- 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销；默认批量会根据 block 数和线程数收窄，避免小 panel 下过度批量影响负载均衡。
+- 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销；当前默认批量上限为 `8`，并会根据 block 数和线程数收窄，避免小 panel 下过度批量影响负载均衡。
 - 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/live 等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 

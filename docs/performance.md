@@ -4,28 +4,28 @@
 
 ## 当前有效结果
 
-当前交付版本是 `runtime_ready_queue_trsm_deps`：
+当前交付版本是 `batch8_default_repeat3`：
 
 ```text
-docs/benchmark_results/runtime_ready_queue_trsm_deps.csv
+docs/benchmark_results/batch8_default_repeat3.csv
 ```
 
 VM 原始输出：
 
 ```text
-/root/bisheng/build/optimization_benchmarks/runtime_ready_queue_trsm_deps.csv
+/root/bisheng/build/optimization_benchmarks/batch8_default_repeat3.csv
 ```
 
 结果摘要：
 
 | Suite | serial avg | contestant avg | speedup |
 | --- | ---: | ---: | ---: |
-| `n512_576` | 0.089390s | 0.072622s | 1.232x |
-| `n768` | 0.228592s | 0.126365s | 1.809x |
-| `n1024` | 0.308963s | 0.165681s | 1.865x |
-| `n1152_small_b` | 0.369142s | 0.287641s | 1.283x |
+| `n512_576` | 0.089365s | 0.071332s | 1.253x |
+| `n768` | 0.238985s | 0.129830s | 1.840x |
+| `n1024` | 0.317327s | 0.169594s | 1.871x |
+| `n1152_small_b` | 0.362999s | 0.296851s | 1.223x |
 
-四个 suite 平均加速比的几何平均约为 `1.520x`。所有 contestant 输出均通过 verifier。
+四个 suite / 3 次重复的 speedup 几何平均约为 `1.515x`，总耗时 speedup 约为 `1.511x`。所有 contestant 输出均通过 verifier。该结果是当前 IR-level、官方 ABI 保留、panel-local ready queue DAG 路线下的有效性能记录；早期整函数替换路线的更高结果不作为当前提交方案。
 
 ## 本轮优化变化
 
@@ -40,7 +40,7 @@ VM 原始输出：
 - 任务队列从 `deque` 改为可复用 vector 队列，并按当前 block 数预留容量。
 - 提交端减少重复 `notify_one`，降低大量小 task 入队时的条件变量通知开销。
 - 小/中等 `b` 的 task 在提交端按小批量 flush，worker/main 在队列积压时批量出队执行，降低 `madd` 密集阶段的锁竞争。
-- 批量大小按 `b` 分级选择，并可用 `COMPILER2026_TASK_BATCH` 在真实平台上覆盖调参。
+- 批量大小按 `b` 分级选择；当前默认把 `b <= 64` 的批量上限设为 `8`，再按 block 数和线程数自动收窄。`COMPILER2026_TASK_BATCH` 仍可在真实平台上覆盖调参。
 - 新增 `COMPILER2026_DAG_PROFILE=1` 观测模式，默认关闭；打开后 runtime 会向 stderr 输出 async path 判定次数和原因、task 数、队列等待、执行时间、worker idle、wait 入口 ready/active/DAG live pressure、主线程 wait 空等、批量出队、DAG dependency state、fanout/live，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。
 - Pass 从 `trsm/madd` 的一维 `GEPOperator` offset 恢复一版 block row/col；嵌套一维 GEP 会先递归累加 element offset，再组合成 runtime 现有的一维 key，调用 `compiler2026_runtime_submit_deps` 把依赖交给 runtime。
 - runtime 增加通用 ready-queue DAG：`madd(k,j,p)` 依赖对应两个 `trsm(k,p)` / `trsm(j,p)` 输出，`trsm` 阶段不再使用全局 wait；panel 末尾仍保留 wait，暂不跨 panel 调度。
@@ -72,7 +72,7 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 示例输出节选：
 
 ```text
-[compiler2026_profile] n=1024 b=32 threads=4 workers=3 batch=16 tasks=5952 ...
+[compiler2026_profile] n=1024 b=32 threads=4 workers=3 batch=8 tasks=5952 ...
 [compiler2026_profile_task] name=trsm count=496 ...
 [compiler2026_profile_task] name=madd count=5456 ...
 ```
@@ -93,7 +93,7 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=batch8_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 ## 历史结果说明
@@ -141,10 +141,12 @@ docs/benchmark_results/block_coordinate_key_smoke.csv
 docs/benchmark_results/async_min_blocks_profile_smoke.csv
 docs/benchmark_results/async_min_blocks5_profile_smoke.csv
 docs/benchmark_results/thread_sweep_profile_smoke.csv
+docs/benchmark_results/batch8_default_repeat3.csv
+docs/benchmark_results/batch8_default_profile_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
-`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv`、`benchmark_overall_summary_smoke.csv`、`dag_successor_fanout_smoke.csv`、`gep_operator_key_smoke.csv`、`ir_submit_counts_smoke.csv`、`dag_reserve_structures_smoke.csv`、`panel_task_reserve_smoke.csv`、`queue_reset_lock_smoke.csv`、`main_wait_profile_smoke.csv`、`dag_live_profile_smoke.csv`、`dag_dep_state_smoke.csv`、`ready_width_profile_smoke.csv`、`adaptive_batch_profile_smoke.csv`、`wait_span_profile_smoke.csv`、`ir_wait_count_profile_smoke.csv`、`dag_release_batch_profile_smoke.csv`、`wait_pressure_profile_smoke.csv`、`recursive_gep_key_smoke.csv`、`smoke_env_passthrough_profile_smoke.csv`、`block_coordinate_key_smoke.csv`、`async_min_blocks_profile_smoke.csv`、`async_min_blocks5_profile_smoke.csv` 和 `thread_sweep_profile_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、最小 block 数开关、线程数开关、线程数扫参 summary 分组、smoke/benchmark 环境透传、async decision 原因聚合、整体 summary 输出、DAG successor fanout 统计、DAG release batch 统计、wait 入口 pressure 统计、block key 恢复 smoke 行为、block row/col 恢复到 runtime key 的路径、递归一维 GEP key 恢复路径、IR call site 计数、静态 wait call site 计数、DAG reserve 行为、panel task reserve 估算、runtime reset 加锁后的 profile 链路、main wait 空等统计、DAG live-pressure 统计、依赖解析状态统计、ready queue 宽度采样统计、自适应 runtime batch 记录和 wait span 统计，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是 task batch 调参对照，当前只作为经验记录，不替代默认配置。
+`profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv`、`benchmark_overall_summary_smoke.csv`、`dag_successor_fanout_smoke.csv`、`gep_operator_key_smoke.csv`、`ir_submit_counts_smoke.csv`、`dag_reserve_structures_smoke.csv`、`panel_task_reserve_smoke.csv`、`queue_reset_lock_smoke.csv`、`main_wait_profile_smoke.csv`、`dag_live_profile_smoke.csv`、`dag_dep_state_smoke.csv`、`ready_width_profile_smoke.csv`、`adaptive_batch_profile_smoke.csv`、`wait_span_profile_smoke.csv`、`ir_wait_count_profile_smoke.csv`、`dag_release_batch_profile_smoke.csv`、`wait_pressure_profile_smoke.csv`、`recursive_gep_key_smoke.csv`、`smoke_env_passthrough_profile_smoke.csv`、`block_coordinate_key_smoke.csv`、`async_min_blocks_profile_smoke.csv`、`async_min_blocks5_profile_smoke.csv`、`thread_sweep_profile_smoke.csv` 和 `batch8_default_profile_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、最小 block 数开关、线程数开关、线程数扫参 summary 分组、smoke/benchmark 环境透传、async decision 原因聚合、整体 summary 输出、DAG successor fanout 统计、DAG release batch 统计、wait 入口 pressure 统计、block key 恢复 smoke 行为、block row/col 恢复到 runtime key 的路径、递归一维 GEP key 恢复路径、IR call site 计数、静态 wait call site 计数、DAG reserve 行为、panel task reserve 估算、runtime reset 加锁后的 profile 链路、main wait 空等统计、DAG live-pressure 统计、依赖解析状态统计、ready queue 宽度采样统计、自适应 runtime batch 记录和 wait span 统计，不作为正式性能均值。`ready_queue_batch8_repeat3.csv` 是早期 task batch 调参对照；`batch8_default_repeat3.csv` 是当前默认 batch 调整后的正式重复结果。
 
 ## 结论
 

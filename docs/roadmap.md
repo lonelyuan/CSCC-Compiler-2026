@@ -85,7 +85,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。
 
-当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA 绑定。
+当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA 绑定。
 
 ## 需要调研的方向
 
