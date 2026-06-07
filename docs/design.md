@@ -98,7 +98,7 @@ Pass 根据 `LoopInfo` 插入同步：
 
 ```bash
 llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - \
-  | grep -n "compiler2026_runtime_should_async\\|compiler2026_async_impl\\|compiler2026_task_\\|compiler2026_runtime_submit\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky"
+  | grep -n "compiler2026_runtime_should_async\\|compiler2026_async_impl\\|compiler2026_task_\\|compiler2026_runtime_submit\\|compiler2026_runtime_wait\\|call.*@trsm\\|call.*@madd\\|define.*block_cholesky"
 ```
 
 已验证 IR 片段包含：

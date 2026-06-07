@@ -262,6 +262,8 @@ Pass 使用 `LoopInfo` 找到 `madd` 所在 panel 循环的出口，在合适的
 call void @compiler2026_runtime_wait()
 ```
 
+benchmark 会把优化后 IR 中的静态 `compiler2026_runtime_wait` call site 数写入 `ir_wait_calls`，用于和运行时 profile 的动态 `wait_calls` / `wait_ms` 区分。
+
 这样可以保证：
 
 - 进入下一 panel 前，所有 `madd` 任务都完成。

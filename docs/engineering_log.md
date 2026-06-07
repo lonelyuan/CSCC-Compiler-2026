@@ -483,3 +483,27 @@
 - `LABEL=wait_span_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/wait_span_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.967136s contestant_total=0.640435s speedup_avg=1.532x speedup_geo=1.508x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.403`、`ready_per_thread_avg=20.351`、`dag_edges_avg=4647.8`、`dag_satisfied_deps_avg=7312.2`、`dag_missing_deps=0`、`max_dag_live=486`、`main_wait_ms_avg=1.457`、`wait_ms_avg=45.063`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 static IR wait count
+
+改动：
+
+- benchmark 在反汇编 `app.opt.bc` 后新增 `ir_wait_calls` 静态计数，统计优化后 IR 中 `compiler2026_runtime_wait()` call site 数。
+- CSV 新增 `ir_wait_calls` 字段，benchmark summary 的 `ir:` 行同步输出该计数。
+- 归档 `ir_wait_count_profile_smoke.csv`，把静态 wait 插入点和动态 `wait_calls` / `wait_ms` 放在同一条记录里。
+
+经验：
+
+- `wait_calls` 是动态执行次数，`wait_ms` 是动态耗时；它们不能说明 Pass 静态插入了多少个 wait call site。`ir_wait_calls` 能直接证明当前 async IR 仍保留 panel barrier 相关 wait 插入点。
+- 跨 panel DAG 改造时，应该同时观察 `ir_wait_calls` 是否下降、动态 `wait_calls/wait_ms` 是否下降，以及 verifier 是否仍通过。
+- 静态 IR 计数只是编译产物证据，不是性能结论；仍需和 CSV 时间、profile summary、IR `submit_deps` 计数交叉判断。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.825x`。
+- `LABEL=ir_wait_count_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/ir_wait_count_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.954983s contestant_total=0.644285s speedup_avg=1.510x speedup_geo=1.486x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.403`、`ready_per_thread_avg=20.101`、`dag_edges_avg=4652.2`、`dag_satisfied_deps_avg=7307.8`、`dag_missing_deps=0`、`max_dag_live=504`、`main_wait_ms_avg=2.707`、`wait_ms_avg=45.206`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
