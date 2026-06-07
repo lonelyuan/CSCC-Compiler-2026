@@ -1091,3 +1091,15 @@
 
 - fanout priority 同时伤害默认 panel-local smoke 和 cross-panel live-window profile smoke，没有达到保留 opt-in 代码的门槛。
 - 代码和脚本改动已回退，只保留 CSV 和日志。后续若继续做关键路径优先，应由 Pass 提供更精确的 critical-path rank 或改成 per-worker queue/work stealing，而不是只按局部 successor fanout 排序。
+
+## 2026-06-08 sync-cholesky live-window repeat benchmark
+
+验证：
+
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 LABEL=cross_panel_sync_cholesky_live2048_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_sync_cholesky_live2048_repeat3.csv`。
+- summary 为 `runs=12 serial_total=2.894289s contestant_total=1.828356s speedup_avg=1.614x speedup_geo=1.587x speedup_p50=1.625x speedup_p95=1.941x`。
+
+经验：
+
+- sync-cholesky + live-window 确实比早期完整 cross-panel DAG 更受控，但 repeat=3 仍没有超过当前默认 `live_window_default_repeat3_final` 的 `contestant_total=1.769841s`、`speedup_geo=1.657x`。
+- 该路径继续保留为 opt-in 实验入口，不默认启用。后续跨 panel 方向应优先解决单全局队列、依赖维护和关键路径调度，而不是继续围绕 cholesky task 化本身调参。
