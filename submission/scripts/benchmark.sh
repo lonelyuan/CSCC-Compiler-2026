@@ -72,7 +72,7 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/ir/app.opt.bc"
 
 "${LLVM_DIS_BIN}" "${BENCH_DIR}/ir/app.opt.bc" -o "${BENCH_DIR}/ir/app.opt.ll"
-IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps3?\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_SUBMIT_PLAIN=$(grep -Ec "call void @compiler2026_runtime_submit\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_WAIT_CALLS=$(grep -Ec "call void @compiler2026_runtime_wait\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_TRSM_CALLS=$(grep -Ec "call .*@trsm\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)

@@ -14,6 +14,7 @@
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
+#include <cstdlib>
 #include <optional>
 #include <set>
 #include <string>
@@ -25,6 +26,7 @@ constexpr const char *kBegin = "compiler2026_runtime_begin";
 constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
+constexpr const char *kSubmitDeps3 = "compiler2026_runtime_submit_deps3";
 constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kShouldAsync = "compiler2026_runtime_should_async";
 constexpr const char *kWait = "compiler2026_runtime_wait";
@@ -36,6 +38,7 @@ struct RuntimeApi {
     llvm::FunctionCallee alloc;
     llvm::FunctionCallee submit;
     llvm::FunctionCallee submit_deps;
+    llvm::FunctionCallee submit_deps3;
     llvm::FunctionCallee register_task;
     llvm::FunctionCallee should_async;
     llvm::FunctionCallee wait;
@@ -44,6 +47,7 @@ struct RuntimeApi {
 
 struct TaskIr {
     llvm::StructType *context_ty;
+    llvm::Function *cholesky_task;
     llvm::Function *trsm_task;
     llvm::Function *madd_task;
 };
@@ -70,6 +74,11 @@ bool isBlockCholesky(llvm::Function &function) {
            name.find("block_cholesky") != std::string::npos;
 }
 
+bool crossPanelDagEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_ENABLE_CROSS_PANEL_DAG");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 llvm::FunctionCallee declareVoidRuntime(llvm::Module &module, const char *name,
                                         llvm::ArrayRef<llvm::Type *> args) {
     llvm::FunctionType *fn_ty =
@@ -91,6 +100,8 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         module.getOrInsertFunction(kAlloc, alloc_ty),
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
+        declareVoidRuntime(module, kSubmitDeps3,
+                           {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kRegisterTask, {ptr_ty, ptr_ty}),
         module.getOrInsertFunction(kShouldAsync,
                                    llvm::FunctionType::get(int32_ty, {int32_ty, int32_ty}, false)),
@@ -136,6 +147,26 @@ void buildOperatorTaskBody(llvm::Module &module, llvm::StructType *context_ty,
     builder.CreateRetVoid();
 }
 
+void buildCholeskyTaskBody(llvm::Module &module, llvm::StructType *context_ty,
+                           llvm::Function *task_fn, llvm::FunctionCallee operator_fn) {
+    llvm::LLVMContext &context = module.getContext();
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", task_fn);
+    llvm::IRBuilder<> builder(entry);
+
+    llvm::Argument *context_arg = task_fn->arg_begin();
+    llvm::Value *arg0 =
+        builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 0));
+    llvm::Value *arg1 =
+        builder.CreateLoad(builder.getPtrTy(), fieldPtr(builder, context_ty, context_arg, 1));
+    llvm::Value *arg2 =
+        builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 3));
+    llvm::Value *arg3 =
+        builder.CreateLoad(builder.getInt32Ty(), fieldPtr(builder, context_ty, context_arg, 4));
+
+    builder.CreateCall(operator_fn, {arg0, arg1, arg2, arg3});
+    builder.CreateRetVoid();
+}
+
 TaskIr getTaskIr(llvm::Module &module) {
     llvm::LLVMContext &context = module.getContext();
     llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
@@ -153,6 +184,18 @@ TaskIr getTaskIr(llvm::Module &module) {
     llvm::FunctionType *operator_ty =
         llvm::FunctionType::get(llvm::Type::getVoidTy(context),
                                 {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+    llvm::FunctionType *cholesky_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                {ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+
+    llvm::Function *cholesky_task = module.getFunction("compiler2026_task_cholesky");
+    if (cholesky_task == nullptr) {
+        cholesky_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
+                                               "compiler2026_task_cholesky", module);
+        cholesky_task->addFnAttr("compiler2026.skip");
+        buildCholeskyTaskBody(module, context_ty, cholesky_task,
+                              module.getOrInsertFunction("cholesky", cholesky_ty));
+    }
 
     llvm::Function *trsm_task = module.getFunction("compiler2026_task_trsm");
     if (trsm_task == nullptr) {
@@ -172,7 +215,7 @@ TaskIr getTaskIr(llvm::Module &module) {
                               module.getOrInsertFunction("madd", operator_ty));
     }
 
-    return {context_ty, trsm_task, madd_task};
+    return {context_ty, cholesky_task, trsm_task, madd_task};
 }
 
 void addLoopExitWaits(llvm::Loop *loop, llvm::FunctionCallee wait,
@@ -190,6 +233,16 @@ void addLoopExitWaits(llvm::Loop *loop, llvm::FunctionCallee wait,
         llvm::IRBuilder<> builder(&*exit->getFirstInsertionPt());
         builder.CreateCall(wait);
     }
+}
+
+llvm::Loop *outermostLoop(llvm::Loop *loop) {
+    if (loop == nullptr) {
+        return nullptr;
+    }
+    while (loop->getParentLoop() != nullptr) {
+        loop = loop->getParentLoop();
+    }
+    return loop;
 }
 
 llvm::Function *cloneForAsync(llvm::Function &function) {
@@ -283,6 +336,20 @@ std::optional<llvm::Value *> buildLinearElementOffset(llvm::IRBuilder<> &builder
     return offset;
 }
 
+bool canBuildLinearElementOffset(llvm::Value *ptr) {
+    auto *gep = llvm::dyn_cast<llvm::GEPOperator>(ptr->stripPointerCasts());
+    if (gep == nullptr || gep->getNumIndices() != 1) {
+        return false;
+    }
+
+    llvm::Value *base = gep->getPointerOperand()->stripPointerCasts();
+    return !llvm::isa<llvm::GEPOperator>(base) || canBuildLinearElementOffset(base);
+}
+
+bool canBuildBlockCoordinate(llvm::Value *ptr) {
+    return canBuildLinearElementOffset(ptr);
+}
+
 std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
                                                    llvm::Value *ptr,
                                                    llvm::Value *n, llvm::Value *b) {
@@ -351,13 +418,42 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
     llvm::Value *context = builder.CreateCall(
         runtime.alloc, {llvm::ConstantInt::get(size_ty, context_size)});
 
-    for (unsigned i = 0; i < 5; ++i) {
-        builder.CreateStore(call->getArgOperand(i), fieldPtr(builder, task_ir.context_ty, context, i));
+    if (call->arg_size() == 4) {
+        builder.CreateStore(call->getArgOperand(0), fieldPtr(builder, task_ir.context_ty, context, 0));
+        builder.CreateStore(call->getArgOperand(1), fieldPtr(builder, task_ir.context_ty, context, 1));
+        builder.CreateStore(llvm::ConstantPointerNull::get(builder.getPtrTy()),
+                            fieldPtr(builder, task_ir.context_ty, context, 2));
+        builder.CreateStore(call->getArgOperand(2), fieldPtr(builder, task_ir.context_ty, context, 3));
+        builder.CreateStore(call->getArgOperand(3), fieldPtr(builder, task_ir.context_ty, context, 4));
+    } else {
+        for (unsigned i = 0; i < 5; ++i) {
+            builder.CreateStore(call->getArgOperand(i),
+                                fieldPtr(builder, task_ir.context_ty, context, i));
+        }
     }
 
-    builder.CreateCall(runtime.submit_deps,
-                       {task_fn, context, dep_keys[0], dep_keys[1], output_key});
+    if (dep_keys.size() > 2) {
+        builder.CreateCall(runtime.submit_deps3,
+                           {task_fn, context, dep_keys[0], dep_keys[1], dep_keys[2],
+                            output_key});
+    } else {
+        builder.CreateCall(runtime.submit_deps,
+                           {task_fn, context, dep_keys[0], dep_keys[1], output_key});
+    }
     call->eraseFromParent();
+    return true;
+}
+
+bool callsHaveCoordinates(llvm::ArrayRef<llvm::CallBase *> calls,
+                          llvm::ArrayRef<unsigned> arg_indices) {
+    for (llvm::CallBase *call : calls) {
+        for (unsigned arg_index : arg_indices) {
+            if (arg_index >= call->arg_size() ||
+                !canBuildBlockCoordinate(call->getArgOperand(arg_index))) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -380,6 +476,7 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
                              {task_ir.madd_task,
                               entry_builder.CreateGlobalStringPtr("madd")});
 
+    std::vector<llvm::CallBase *> cholesky_calls;
     std::vector<llvm::CallBase *> trsm_calls;
     std::vector<llvm::CallBase *> madd_calls;
     for (llvm::BasicBlock &block : async_fn) {
@@ -390,7 +487,9 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             }
 
             const llvm::StringRef callee = getCalledName(*call);
-            if (callee == "trsm") {
+            if (callee == "cholesky") {
+                cholesky_calls.push_back(call);
+            } else if (callee == "trsm") {
                 trsm_calls.push_back(call);
             } else if (callee == "madd") {
                 madd_calls.push_back(call);
@@ -399,26 +498,55 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
     }
 
     std::set<llvm::BasicBlock *> wait_blocks;
+    const bool can_cross_panel =
+        crossPanelDagEnabledFromEnv() &&
+        !cholesky_calls.empty() &&
+        callsHaveCoordinates(cholesky_calls, {0, 1}) &&
+        callsHaveCoordinates(trsm_calls, {0, 1, 2}) &&
+        callsHaveCoordinates(madd_calls, {0, 1, 2});
 
-    for (llvm::CallBase *call : trsm_calls) {
-        if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                              n, b, {}, 0)) {
-            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-            addLoopExitWaits(loop, runtime.wait, wait_blocks);
-            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
+    if (can_cross_panel) {
+        entry_builder.CreateCall(runtime.register_task,
+                                 {task_ir.cholesky_task,
+                                  entry_builder.CreateGlobalStringPtr("cholesky")});
+
+        for (llvm::CallBase *call : cholesky_calls) {
+            replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.cholesky_task,
+                                             n, b, {0}, 1);
         }
-    }
 
-    for (llvm::CallBase *call : madd_calls) {
-        llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-        llvm::Loop *sync_loop =
-            (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
-        addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
-        // Panel-local scheduling waits before the next panel, so madd outputs
-        // have no downstream async consumers in the current DAG scope.
-        if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                              n, b, {0, 1}, kNoOutputKey)) {
-            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
+        for (llvm::CallBase *call : trsm_calls) {
+            replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
+                                             n, b, {0, 1}, 2);
+        }
+
+        for (llvm::CallBase *call : madd_calls) {
+            llvm::Loop *outer_loop = outermostLoop(loop_info.getLoopFor(call->getParent()));
+            replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
+                                             n, b, {0, 1, 2}, 2);
+            addLoopExitWaits(outer_loop, runtime.wait, wait_blocks);
+        }
+    } else {
+        for (llvm::CallBase *call : trsm_calls) {
+            if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
+                                                  n, b, {}, 0)) {
+                llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+                addLoopExitWaits(loop, runtime.wait, wait_blocks);
+                replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
+            }
+        }
+
+        for (llvm::CallBase *call : madd_calls) {
+            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+            llvm::Loop *sync_loop =
+                (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
+            addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
+            // Panel-local scheduling waits before the next panel, so madd outputs
+            // have no downstream async consumers in the current DAG scope.
+            if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
+                                                  n, b, {0, 1}, kNoOutputKey)) {
+                replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
+            }
         }
     }
 

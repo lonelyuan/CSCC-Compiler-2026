@@ -88,6 +88,20 @@ The tuning wrapper calls `benchmark.sh` for each threshold/batch pair, lets
 pre-submission profiling on the real target machine, not for timed contestant
 execution.
 
+An experimental cross-panel DAG path is available for development builds:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 LABEL=cross_panel_profile REPEAT=1 \
+  COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh
+```
+
+This path taskizes `cholesky`, adds a three-dependency submit for `madd`, and
+replaces the static panel-end wait with one outer DAG drain wait. It currently
+passes local verifier smoke but is slower than the default panel-local DAG on
+the 4-vCPU VM, so it is opt-in.
+
 Package artifacts:
 
 ```bash
@@ -120,6 +134,10 @@ Current implementation:
   allocation, adaptive task submit/dequeue batching, an opt-in profiling mode,
   and a panel-local ready queue for `trsm` to `madd` dependencies. Official
   `trsm` and `madd` ABI calls remain in Pass-generated IR task functions.
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` enables an experimental full-DAG
+  lowering where Pass-generated `cholesky`, `trsm`, and `madd` task functions
+  directly call the official ABI operators. The default remains panel-local
+  because current VM evidence shows lower overhead and better geomean speedup.
 - `scripts/tune_params.sh` provides an offline wrapper around `benchmark.sh` for
   environment-specific threshold/batch/thread sweeps. Runtime defaults remain
   deterministic and cheap during contestant execution.

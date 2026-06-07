@@ -786,3 +786,31 @@
 - `LABEL=async_min_b18_madd_no_output_default_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/async_min_b18_madd_no_output_default_profile_smoke.csv`；async decision 为 `enabled=24 disabled=15 small_b=15 small_blocks=0 threads_disabled=0 single_block=0`，profile summary 包含 `runtime_batch_max=8`、`dag_missing_deps=0`。
 - 优化后 IR 检查确认 `trsm` submit output key 仍为动态 block key，`madd` submit output key 为 `i32 -1`，`compiler2026_task_trsm` 直接调用 `@trsm`，`compiler2026_task_madd` 直接调用 `@madd`。
 - `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-08 opt-in cross-panel DAG experiment
+
+改动：
+
+- Pass 新增 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 实验入口；默认不设置时仍走 panel-local ready queue DAG。
+- 实验入口中，Pass 生成 `compiler2026_task_cholesky`，task function 直接调用官方 `@cholesky`；`trsm/madd` task 仍直接调用官方 `@trsm/@madd`。
+- runtime 新增通用 `compiler2026_runtime_submit_deps3`，内部 `submitWithDeps` 改为接收依赖数组，支持三输入依赖并去重；runtime 仍只理解 task function、context 和整数 block key。
+- 跨 panel 路径中，`cholesky` 依赖当前对角块 previous producer 并输出对角块；`trsm` 依赖目标块和对角块并输出目标块；`madd` 依赖两个 `trsm` 输入块和自身输出块 previous producer，并输出被更新块。
+- panel 内静态 wait 被降为外层 DAG 收尾 wait，避免每个 panel 后都强制等待全部 trailing updates。
+
+经验：
+
+- profile 基础设施已经足够支撑大方向优化判断：IR call site、async decision、DAG live/edge/missing-dep、queue/wait 统计和 verifier 已能说明跨 panel 路径的主要瓶颈。
+- 直接构建完整跨 panel DAG 在 4 vCPU VM 上没有成为性能收益，原因是 live DAG 和 ready queue 压力显著放大；下一步应做 live-windowing、关键块优先释放或 per-worker queue/work stealing，而不是继续细化无关 profile 字段。
+- `dag_missing_deps=7595` 在跨 panel 模式中包含 first-touch/no previous producer 情况，不能直接当作 correctness error；后续 profile 语义应区分“允许的 first touch”和“本应存在但缺失的 producer”。
+- 默认路径必须保持 panel-local。跨 panel 实验通过 verifier 但性能低于当前默认，因此只作为研发入口保留。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./scripts/sync_to_vm.sh` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.607x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.542x`。
+- `LABEL=cross_panel_gate_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 已归档为 `docs/benchmark_results/cross_panel_gate_default_repeat3.csv`；summary 为 `speedup_geo=1.633x`，IR 计数为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，证明默认 gate 没有切到实验路径。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 LABEL=cross_panel_opt_in_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_opt_in_profile_smoke.csv`；summary 为 `speedup_geo=1.499x`，IR 计数为 `submit_deps=3 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，profile 包含 `dag_missing_deps=7595`、`max_dag_live=6072`、`queue_ms_avg=4441.029`。

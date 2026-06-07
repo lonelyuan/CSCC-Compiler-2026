@@ -163,7 +163,8 @@ public:
         enqueueTask(task);
     }
 
-    void submitWithDeps(TaskFn fn, void *context, int dep_a, int dep_b, int output) {
+    void submitWithDeps(TaskFn fn, void *context, const int *deps, std::size_t dep_count,
+                        int output) {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         if (workers_.empty()) {
             Task task{fn, context, profiling ? nowNs() : 0};
@@ -186,10 +187,20 @@ public:
                 max_dag_live_ = std::max(max_dag_live_, pending_dag_tasks_);
             }
 
-            const int deps[] = {dep_a, dep_b};
-            for (int i = 0; i < 2; ++i) {
+            for (std::size_t i = 0; i < dep_count; ++i) {
                 const int dep = deps[i];
-                if (dep < 0 || (i == 1 && dep == deps[0])) {
+                if (dep < 0) {
+                    continue;
+                }
+
+                bool duplicate = false;
+                for (std::size_t prev = 0; prev < i; ++prev) {
+                    if (deps[prev] == dep) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) {
                     continue;
                 }
 
@@ -905,8 +916,16 @@ extern "C" void compiler2026_runtime_submit(TaskFn fn, void *context) {
 }
 
 extern "C" void compiler2026_runtime_submit_deps(TaskFn fn, void *context,
-                                                  int dep_a, int dep_b, int output) {
-    activeRuntime().submitWithDeps(fn, context, dep_a, dep_b, output);
+                                                   int dep_a, int dep_b, int output) {
+    const int deps[] = {dep_a, dep_b};
+    activeRuntime().submitWithDeps(fn, context, deps, 2, output);
+}
+
+extern "C" void compiler2026_runtime_submit_deps3(TaskFn fn, void *context,
+                                                   int dep_a, int dep_b, int dep_c,
+                                                   int output) {
+    const int deps[] = {dep_a, dep_b, dep_c};
+    activeRuntime().submitWithDeps(fn, context, deps, 3, output);
 }
 
 extern "C" void compiler2026_runtime_wait() {

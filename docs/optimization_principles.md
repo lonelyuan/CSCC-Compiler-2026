@@ -484,6 +484,8 @@ writes block(row, col)
 
 这样可以利用 profile 基础设施，又避免自动调优本身吞掉计时预算或对单次 judge 输入过拟合。
 
+当前已有一版 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 跨 panel 实验路径：Pass 会把 `cholesky` 也 taskize，并用三依赖 submit 表达 `madd` 的两个 `trsm` 输入和自身输出块 previous producer。它证明了现有 IR 坐标恢复、runtime DAG 和 profile 链路已经能承载大方向优化，但 4 vCPU VM profile 显示 live DAG 和队列开销过大，暂时不应默认启用。下一步应减少 live window 或改队列结构，而不是继续增加 profile 字段。
+
 ## 8. 可以调研的方向
 
 如果继续从编译器和并行运行时角度推进，建议调研：
