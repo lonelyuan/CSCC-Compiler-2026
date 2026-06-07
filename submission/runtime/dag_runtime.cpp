@@ -756,7 +756,7 @@ std::size_t resolveThreadCount(int n, int b) {
 }
 
 int asyncMinBlockSize() {
-    int threshold = 24;
+    int threshold = 18;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
         char *end = nullptr;
         const long configured = std::strtol(env, &end, 10);

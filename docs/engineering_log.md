@@ -761,3 +761,28 @@
 - VM 单组合非 profile wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=1 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=24 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_wrapper_smoke REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_wrapper_smoke_aggregate.csv`；summary 为 `threads=1 async_min_b=24 task_batch=auto runs=4 serial_total=0.978023s contestant_total=0.963611s speedup_geo=1.009x dag_missing_deps=0`。
 - VM 单组合 profile wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=24 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_wrapper_profile_smoke COMPILER2026_TUNE_PROFILE=1 REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_wrapper_profile_smoke_aggregate.csv`；summary 为 `threads=4 async_min_b=24 task_batch=auto runs=4 serial_total=0.979418s contestant_total=0.630574s speedup_geo=1.545x dag_missing_deps=0`，profile summary 包含 `enabled=22 disabled=17 small_b=17`、`runtime_batch_max=8`。
 - `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-08 async threshold 18 and madd output elision
+
+改动：
+
+- 默认 `COMPILER2026_ASYNC_MIN_B` 从 `24` 降到 `18`，runtime、`smoke_test.sh` 和 `benchmark.sh` 的默认值同步。
+- Pass 对当前 panel-local DAG 中的 `madd` submit 使用 output key `-1`；`madd` 仍依赖两个 `trsm` 输入 key，但不再把自身输出写入 runtime `latest_producer_` 表。
+- `trsm` submit 继续记录 output key，仍由 runtime 释放依赖它的 `madd` task。
+- 同步更新 README、设计、性能、路线图和优化原理文档，并归档 `async_min_b18_madd_no_output_default_repeat3.csv` / `async_min_b18_madd_no_output_default_profile_smoke.csv`。
+
+经验：
+
+- 当前 panel 末尾仍有 wait，因此 `madd` 输出在当前 DAG 作用域内没有后续 async consumer；不记录这类 output key 能减少无收益的 producer 表更新。后续做跨 panel DAG 时必须重新纳入相关 `madd` 输出依赖，不能把 `-1` 当成永久语义。
+- 单独缓存 hot-path profiling flag 的实验没有形成收益：`profile_flag_hotpath_repeat3` 为 `speedup_geo=1.531x`，低于当前正式 `1.559x`，该改动未保留。
+- `b >= 18` 会多启用公开 case 中的 `b=18/20` 等矩阵；在当前 VM 上收益主要来自 `n512_576` 和 `n1152_small_b` 的小 block 区间。它仍是环境相关默认，真实目标机应继续用 `tune_params.sh` 扫参确认。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在默认阈值下 verifier 通过，speedup `1.600x`。
+- `LABEL=async_min_b18_madd_no_output_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/async_min_b18_madd_no_output_default_repeat3.csv`；summary 为 `runs=12 serial_total=2.981399s contestant_total=1.801099s speedup_avg=1.655x speedup_geo=1.635x`，IR 计数仍为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`。
+- `LABEL=async_min_b18_madd_no_output_default_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/async_min_b18_madd_no_output_default_profile_smoke.csv`；async decision 为 `enabled=24 disabled=15 small_b=15 small_blocks=0 threads_disabled=0 single_block=0`，profile summary 包含 `runtime_batch_max=8`、`dag_missing_deps=0`。
+- 优化后 IR 检查确认 `trsm` submit output key 仍为动态 block key，`madd` submit output key 为 `i32 -1`，`compiler2026_task_trsm` 直接调用 `@trsm`，`compiler2026_task_madd` 直接调用 `@madd`。
+- `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

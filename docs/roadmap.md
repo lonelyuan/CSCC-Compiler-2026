@@ -6,7 +6,7 @@
 
 当前本地 openEuler VM 只分配 4 个 vCPU，不能代表真实测试平台。鲲鹏 920 常见服务器配置是单路 48/64 核或双路更多核心，内存带宽、NUMA、cache 层次、线程调度开销都和本地 VM 差异很大。
 
-本项目后续不应把 `COMPILER2026_DAG_THREADS=4`、`b >= 24` 等参数视为最终常量，而应把它们作为当前调试平台上的经验值。真实平台上需要按核心数、block size、矩阵规模和算子耗时动态决策。
+本项目后续不应把 `COMPILER2026_DAG_THREADS=4`、`b >= 18` 等参数视为最终常量，而应把它们作为当前调试平台上的经验值。真实平台上需要按核心数、block size、矩阵规模和算子耗时动态决策。
 
 ## 更鲁棒的实验设计
 
@@ -61,7 +61,7 @@ cholesky(p+1) depends only on updates to block (p+1, p+1)
 trsm(r, p+1) depends on updates to block (r, p+1)
 ```
 
-当前实现已经去掉 `trsm` 阶段全局 wait，让 `madd` 在对应两个 `trsm` 完成后进入 ready queue；panel barrier 完成后 runtime 会清理 panel-local DAG 状态，避免旧 producer 表跨 panel 残留。下一步才是让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成；这是大核数平台上最重要的性能空间。
+当前实现已经去掉 `trsm` 阶段全局 wait，让 `madd` 在对应两个 `trsm` 完成后进入 ready queue；`madd` submit 在当前 panel-local 作用域中使用 output key `-1`，避免为 panel 内无消费者的输出更新 producer 表。panel barrier 完成后 runtime 会清理 panel-local DAG 状态，避免旧 producer 表跨 panel 残留。下一步才是让下一 panel 的关键路径提前启动，不必等待整个 trailing matrix 更新完成；这是大核数平台上最重要的性能空间。
 
 ### 3. 运行时任务粒度自适应
 

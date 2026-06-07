@@ -29,6 +29,7 @@ constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kShouldAsync = "compiler2026_runtime_should_async";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kEnd = "compiler2026_runtime_end";
+constexpr int kNoOutputKey = -1;
 
 struct RuntimeApi {
     llvm::FunctionCallee begin;
@@ -312,7 +313,7 @@ std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
 bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
                                       TaskIr &task_ir, llvm::Function *task_fn,
                                       llvm::Value *n, llvm::Value *b,
-                                      llvm::ArrayRef<unsigned> dep_args, unsigned output_arg) {
+                                      llvm::ArrayRef<unsigned> dep_args, int output_arg) {
     llvm::Module *module = call->getModule();
     llvm::IRBuilder<> builder(call);
 
@@ -328,13 +329,18 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
     }
 
     while (dep_keys.size() < 2) {
-        dep_keys.push_back(builder.getInt32(-1));
+        dep_keys.push_back(builder.getInt32(kNoOutputKey));
     }
 
-    std::optional<BlockCoordinate> output_coord =
-        buildBlockCoordinate(builder, call->getArgOperand(output_arg), n, b);
-    if (!output_coord) {
-        return false;
+    llvm::Value *output_key = builder.getInt32(kNoOutputKey);
+    if (output_arg >= 0) {
+        std::optional<BlockCoordinate> output_coord =
+            buildBlockCoordinate(builder, call->getArgOperand(static_cast<unsigned>(output_arg)),
+                                 n, b);
+        if (!output_coord) {
+            return false;
+        }
+        output_key = output_coord->linear_key;
     }
 
     const llvm::DataLayout &layout = module->getDataLayout();
@@ -350,7 +356,7 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
     }
 
     builder.CreateCall(runtime.submit_deps,
-                       {task_fn, context, dep_keys[0], dep_keys[1], output_coord->linear_key});
+                       {task_fn, context, dep_keys[0], dep_keys[1], output_key});
     call->eraseFromParent();
     return true;
 }
@@ -408,8 +414,10 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
         llvm::Loop *sync_loop =
             (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
         addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
+        // Panel-local scheduling waits before the next panel, so madd outputs
+        // have no downstream async consumers in the current DAG scope.
         if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                              n, b, {0, 1}, 2)) {
+                                              n, b, {0, 1}, kNoOutputKey)) {
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
         }
     }
