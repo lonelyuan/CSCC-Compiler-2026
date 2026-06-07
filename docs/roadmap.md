@@ -87,7 +87,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - NUMA-aware task placement。
 - 避免单全局队列在 48/64 核上成为瓶颈。
 
-当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。
+当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。DAG successor 边已经从每个 node 一个小 vector 改为统一 edge pool，减少了 fanout 边的小分配；这降低了当前全局队列模型的构图开销，但不替代 per-worker deque/work stealing。
 
 当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA 绑定。
 
@@ -111,7 +111,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 - Panel 末尾 barrier 仍过保守，限制大核数可扩展性。
 - Pass 已有一版基于一维 `GEPOperator` offset 的 block row/col 恢复，并支持递归累加嵌套一维 GEP offset；runtime 仍接收由 row/col 组合出的线性 key，还不是通用数组子块坐标和读写集合分析。
-- Runtime 仍以单全局队列为核心，虽然已有批量提交/出队缓解，扩展到 32 核以上仍可能出现锁竞争。
+- Runtime 仍以单全局队列为核心，虽然已有批量提交/出队和连续 successor edge pool 缓解，扩展到 32 核以上仍可能出现锁竞争。
 - 跨 panel DAG 已有 opt-in 实验路径，但需要继续处理 first-touch 依赖统计、live DAG 内存/锁开销和队列扩展性，不能只靠移除 panel wait 直接默认启用。
 - 阈值仍来自经验测试；async 入口已由 runtime predicate 按 block size、最小 block count 和 thread count 控制，默认 task batch 已开始参考 block count/thread count，runtime 和 benchmark 已能记录 profile，`tune_params.sh` 已能生成离线 aggregate CSV，但尚未形成跨运行的自动 profile-guided heuristic。
 

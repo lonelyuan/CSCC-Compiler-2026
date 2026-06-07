@@ -29,7 +29,7 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=successor_edge_pool_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 The current default auto batch uses an upper bound of `8` for `b <= 64`;
@@ -132,8 +132,9 @@ Current implementation:
   the runtime producer table and release dependent `madd` tasks.
 - The runtime is a generic reusable task scheduler with arena context
   allocation, adaptive task submit/dequeue batching, an opt-in profiling mode,
-  and a panel-local ready queue for `trsm` to `madd` dependencies. Official
-  `trsm` and `madd` ABI calls remain in Pass-generated IR task functions.
+  a panel-local ready queue for `trsm` to `madd` dependencies, and a contiguous
+  successor edge pool for DAG fanout. Official `trsm` and `madd` ABI calls
+  remain in Pass-generated IR task functions.
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` enables an experimental full-DAG
   lowering where Pass-generated `cholesky`, `trsm`, and `madd` task functions
   directly call the official ABI operators. The default remains panel-local

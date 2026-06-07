@@ -451,6 +451,8 @@ writes block(row, col)
 大 b：保持细粒度，必要时进一步切分大算子外层循环
 ```
 
+当前 DAG 边存储也做了轻量优化：successor 关系集中放在连续 edge pool 中，每个 producer 只保存链表头尾。这样能减少 `trsm` 释放大量 `madd` 时的小对象分配，但调度语义仍是同一个 ready-queue DAG。
+
 ### 7.4 大核数 runtime
 
 当前 runtime 使用单全局队列，适合验证方向，但在 48/64 核上可能出现锁竞争。

@@ -814,3 +814,26 @@
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.542x`。
 - `LABEL=cross_panel_gate_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 已归档为 `docs/benchmark_results/cross_panel_gate_default_repeat3.csv`；summary 为 `speedup_geo=1.633x`，IR 计数为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，证明默认 gate 没有切到实验路径。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 LABEL=cross_panel_opt_in_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_opt_in_profile_smoke.csv`；summary 为 `speedup_geo=1.499x`，IR 计数为 `submit_deps=3 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，profile 包含 `dag_missing_deps=7595`、`max_dag_live=6072`、`queue_ms_avg=4441.029`。
+
+## 2026-06-08 successor edge pool
+
+改动：
+
+- runtime 的 DAG successor 存储从每个 `DagNode` 一个 `std::vector<int>` 改为统一的 `successor_edges_` 连续 edge pool。
+- 每个 producer node 保存 `first_successor`、`last_successor` 和 `successor_count`，新增依赖边时追加到 edge pool 并维护链表尾指针，保留原有 successor 提交顺序。
+- `resetQueue()` 按 panel task 预估值额外预留约 `2 * reserve_tasks` 条 edge 容量；`wait()` 清理 panel-local DAG 时同步清理 edge pool。
+
+经验：
+
+- 当前 DAG 的高 fanout 主要来自 `trsm` producer 释放大量 `madd` consumer。把 successor 边集中到连续数组能减少小 vector 分配和扩容，比继续堆 profile 字段更直接作用于调度热路径。
+- 修改 aggregate initialization 时要格外小心。第一版保留了旧的尾部 `{}`，把 `first_successor` 初始化成 `0` 而不是默认 `-1`，导致无 successor 节点错误遍历 edge 0；`SPEC_START=91 SPEC_END=104` verifier 捕捉到 `n=1152,b=18` 失败。修正为只初始化前四个字段后 verifier 通过。
+- profile 模式下 `dag_edges` 和 `dag_satisfied_deps` 会受提交线程和 worker 完成速度交错影响；判断这类调度结构优化时，应以非 profile `REPEAT=3` 时间、verifier、IR 计数和 `dag_missing_deps=0` 一起作为证据。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.638x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.597x`。
+- `LABEL=successor_edge_pool_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/successor_edge_pool_repeat3.csv`；summary 为 `runs=12 serial_total=2.973509s contestant_total=1.780286s speedup_avg=1.663x speedup_geo=1.645x`，IR 计数仍为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`。
+- `LABEL=successor_edge_pool_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/successor_edge_pool_profile_smoke.csv`；summary 为 `speedup_geo=1.523x`，async decision 为 `enabled=24 disabled=15 small_b=15 small_blocks=0 threads_disabled=0 single_block=0`，profile 包含 `runtime_batch_max=8`、`dag_missing_deps=0`、`max_dag_successors=46`、`max_dag_live=635`。

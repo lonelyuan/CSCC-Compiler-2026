@@ -63,7 +63,14 @@ class AsyncRuntime {
         void *context = nullptr;
         int pending = 0;
         bool completed = false;
-        std::vector<int> successors;
+        int first_successor = -1;
+        int last_successor = -1;
+        std::size_t successor_count = 0;
+    };
+
+    struct DagEdge {
+        int successor = -1;
+        int next = -1;
     };
 
 public:
@@ -125,11 +132,16 @@ public:
         if (reserve_tasks > dag_nodes_.capacity()) {
             dag_nodes_.reserve(reserve_tasks);
         }
+        const std::size_t reserve_edges = reserve_tasks * 2;
+        if (reserve_edges > successor_edges_.capacity()) {
+            successor_edges_.reserve(reserve_edges);
+        }
         if (reserve_tasks > latest_producer_.bucket_count()) {
             latest_producer_.reserve(reserve_tasks);
         }
         tasks_.clear();
         dag_nodes_.clear();
+        successor_edges_.clear();
         latest_producer_.clear();
         pending_dag_tasks_ = 0;
         task_head_ = 0;
@@ -180,7 +192,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const int node_index = static_cast<int>(dag_nodes_.size());
-            dag_nodes_.push_back({fn, context, 0, false, {}});
+            dag_nodes_.push_back({fn, context, 0, false});
             ++pending_dag_tasks_;
             if (profiling) {
                 ++profile_dag_nodes_;
@@ -214,12 +226,22 @@ public:
 
                 DagNode &producer_node = dag_nodes_[producer->second];
                 if (!producer_node.completed) {
-                    producer_node.successors.push_back(node_index);
+                    const int edge_index = static_cast<int>(successor_edges_.size());
+                    successor_edges_.push_back({node_index, -1});
+                    if (producer_node.last_successor >= 0) {
+                        successor_edges_[static_cast<std::size_t>(
+                                             producer_node.last_successor)]
+                            .next = edge_index;
+                    } else {
+                        producer_node.first_successor = edge_index;
+                    }
+                    producer_node.last_successor = edge_index;
+                    ++producer_node.successor_count;
                     ++dag_nodes_[node_index].pending;
                     if (profiling) {
                         ++profile_dag_edges_;
                         max_dag_successors_ =
-                            std::max(max_dag_successors_, producer_node.successors.size());
+                            std::max(max_dag_successors_, producer_node.successor_count);
                     }
                 } else if (profiling) {
                     ++profile_dag_satisfied_deps_;
@@ -442,13 +464,15 @@ private:
             node.completed = true;
             --pending_dag_tasks_;
 
-            for (int successor_index : node.successors) {
-                DagNode &successor = dag_nodes_[static_cast<std::size_t>(successor_index)];
+            for (int edge_index = node.first_successor; edge_index >= 0;) {
+                const DagEdge &edge = successor_edges_[static_cast<std::size_t>(edge_index)];
+                edge_index = edge.next;
+                DagNode &successor = dag_nodes_[static_cast<std::size_t>(edge.successor)];
                 --successor.pending;
                 if (successor.pending == 0) {
                     enqueueTaskLocked({successor.fn, successor.context,
                                        profile_enabled_.load(std::memory_order_relaxed) ? nowNs() : 0,
-                                       successor_index});
+                                       edge.successor});
                     if (profile_enabled_.load(std::memory_order_relaxed)) {
                         ++profile_dag_released_;
                     }
@@ -461,6 +485,7 @@ private:
 
     void clearCompletedDagStateLocked() {
         dag_nodes_.clear();
+        successor_edges_.clear();
         latest_producer_.clear();
         pending_dag_tasks_ = 0;
     }
@@ -683,6 +708,7 @@ private:
     std::vector<std::thread> workers_;
     std::vector<Task> tasks_;
     std::vector<DagNode> dag_nodes_;
+    std::vector<DagEdge> successor_edges_;
     std::unordered_map<int, int> latest_producer_;
     std::size_t pending_dag_tasks_ = 0;
     std::array<Task, kMaxTaskBatch> pending_tasks_{};
