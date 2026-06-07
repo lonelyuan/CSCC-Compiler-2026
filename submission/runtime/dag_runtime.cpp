@@ -17,6 +17,11 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#endif
+
 namespace {
 
 using TaskFn = void (*)(void *);
@@ -34,6 +39,28 @@ std::uint64_t nowNs() {
 bool profileEnabledFromEnv() {
     const char *env = std::getenv("COMPILER2026_DAG_PROFILE");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool workerPinningEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_DAG_PIN_WORKERS");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+std::vector<int> allowedCpuList() {
+    std::vector<int> cpus;
+#ifdef __linux__
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        return cpus;
+    }
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &allowed)) {
+            cpus.push_back(cpu);
+        }
+    }
+#endif
+    return cpus;
 }
 
 class AsyncRuntime {
@@ -75,13 +102,15 @@ class AsyncRuntime {
     };
 
 public:
-    explicit AsyncRuntime(std::size_t worker_count) {
+    explicit AsyncRuntime(std::size_t worker_count)
+        : pin_workers_(workerPinningEnabledFromEnv()),
+          worker_cpus_(pin_workers_ ? allowedCpuList() : std::vector<int>{}) {
         if (worker_count == 0) {
             return;
         }
         workers_.reserve(worker_count);
         for (std::size_t i = 0; i < worker_count; ++i) {
-            workers_.emplace_back([this]() { workerLoop(); });
+            workers_.emplace_back([this, i]() { workerLoop(i); });
         }
     }
 
@@ -481,7 +510,23 @@ public:
     }
 
 private:
-    void workerLoop() {
+    void pinCurrentWorker(std::size_t worker_index) {
+#ifdef __linux__
+        if (!pin_workers_ || worker_cpus_.empty()) {
+            return;
+        }
+        const int cpu = worker_cpus_[worker_index % worker_cpus_.size()];
+        cpu_set_t target;
+        CPU_ZERO(&target);
+        CPU_SET(cpu, &target);
+        (void)pthread_setaffinity_np(pthread_self(), sizeof(target), &target);
+#else
+        (void)worker_index;
+#endif
+    }
+
+    void workerLoop(std::size_t worker_index) {
+        pinCurrentWorker(worker_index);
         while (true) {
             std::array<Task, kMaxTaskBatch> batch{};
             std::size_t batch_count = 0;
@@ -916,6 +961,8 @@ private:
     std::size_t max_wait_dag_live_ = 0;
     std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
     std::size_t task_profile_count_ = 0;
+    bool pin_workers_ = false;
+    std::vector<int> worker_cpus_;
 };
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;

@@ -1025,3 +1025,29 @@
 - `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
 - `git diff --check` 通过。
 - 回退后 `submission/runtime/dag_runtime.cpp` 无未提交 diff。
+
+## 2026-06-08 worker pinning experiment
+
+改动：
+
+- runtime 新增默认关闭的 `COMPILER2026_DAG_PIN_WORKERS=1`。
+- Linux 下启用该开关时，worker 线程读取当前进程 affinity mask，并按可用 CPU 列表轮转绑定；非 Linux 或 affinity 读取失败时自动退化为不绑定。
+- `smoke_test.sh` 和 `benchmark.sh` 透传该开关，benchmark CSV 新增 `dag_pin_workers` 字段。
+- `tune_params.sh` 的 aggregate summary 将 `dag_pin_workers` 纳入分组，避免 pinning 与非 pinning 结果混合。
+
+经验：
+
+- 在 4 vCPU VM 上，pinning repeat=3 略好于同轮默认 guard，但没有超过当前最佳正式记录；因此不切默认。
+- worker 亲和性属于强环境相关优化。真实鲲鹏/NUMA 平台上仍值得和线程数、NUMA 绑定一起离线测试，但 contestant 默认路径保持不绑定，避免对未知调度环境过拟合。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 COMPILER2026_TUNE_TASK_BATCH_LIST=auto REPEAT=1 ./submission/scripts/tune_params.sh`。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.618x`。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PIN_WORKERS=1 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.632x`。
+- `LABEL=pin_workers_schema_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/pin_workers_schema_default_repeat3.csv`；summary 为 `contestant_total=1.790583s speedup_geo=1.633x`。
+- `COMPILER2026_DAG_PIN_WORKERS=1 LABEL=pin_workers_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/pin_workers_repeat3.csv`；summary 为 `contestant_total=1.775266s speedup_geo=1.646x`。
+- `COMPILER2026_DAG_PIN_WORKERS=1 COMPILER2026_DAG_PROFILE=1 LABEL=pin_workers_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/pin_workers_profile_smoke.csv`。
+- `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。

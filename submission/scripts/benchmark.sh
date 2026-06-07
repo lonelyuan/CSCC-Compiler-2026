@@ -29,6 +29,7 @@ TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
 ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-18}"
 ASYNC_MIN_BLOCKS="${COMPILER2026_ASYNC_MIN_BLOCKS:-2}"
 DAG_MAX_LIVE="${COMPILER2026_DAG_MAX_LIVE:-0}"
+DAG_PIN_WORKERS="${COMPILER2026_DAG_PIN_WORKERS:-0}"
 KEEP_ARTIFACTS="${COMPILER2026_BENCH_KEEP_ARTIFACTS:-0}"
 REPEAT="${REPEAT:-3}"
 LABEL="${LABEL:-run}"
@@ -89,7 +90,7 @@ IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,async_min_blocks,dag_max_live,profile_enabled,ir_submit_deps,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_small_blocks,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_first_touch_deps,dag_initial_ready,dag_released,dag_release_batches,max_dag_release_batch,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,wait_ready_avg,wait_active_avg,wait_dag_live_avg,max_wait_ready,max_wait_active,max_wait_dag_live,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,async_min_blocks,dag_max_live,dag_pin_workers,profile_enabled,ir_submit_deps,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_small_blocks,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_first_touch_deps,dag_initial_ready,dag_released,dag_release_batches,max_dag_release_batch,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,wait_ready_avg,wait_active_avg,wait_dag_live_avg,max_wait_ready,max_wait_active,max_wait_dag_live,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -118,6 +119,7 @@ run_suite() {
       COMPILER2026_ASYNC_MIN_B="${ASYNC_MIN_B}" \
       COMPILER2026_ASYNC_MIN_BLOCKS="${ASYNC_MIN_BLOCKS}" \
       COMPILER2026_DAG_MAX_LIVE="${DAG_MAX_LIVE}" \
+      COMPILER2026_DAG_PIN_WORKERS="${DAG_PIN_WORKERS}" \
         "${BENCH_DIR}/bin/contestant_app" \
         "${suite_dir}/input.bin" \
         "${suite_dir}/contestant_${run}.out" \
@@ -134,7 +136,8 @@ run_suite() {
     fi
 
     python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${TASK_BATCH}" \
-      "${ASYNC_MIN_B}" "${ASYNC_MIN_BLOCKS}" "${DAG_MAX_LIVE}" "${PROFILE}" \
+      "${ASYNC_MIN_B}" "${ASYNC_MIN_BLOCKS}" "${DAG_MAX_LIVE}" \
+      "${DAG_PIN_WORKERS}" "${PROFILE}" \
       "${IR_SUBMIT_DEPS}" "${IR_SUBMIT_PLAIN}" "${IR_WAIT_CALLS}" \
       "${IR_TRSM_CALLS}" "${IR_MADD_CALLS}" \
       "${suite_dir}/serial_${run}.time" \
@@ -153,6 +156,7 @@ import sys
     async_min_b,
     async_min_blocks,
     dag_max_live,
+    dag_pin_workers,
     profile_enabled,
     ir_submit_deps,
     ir_submit_plain,
@@ -286,6 +290,7 @@ writer.writerow([
     async_min_b,
     async_min_blocks,
     dag_max_live,
+    dag_pin_workers,
     "1" if profile_enabled not in ("", "0") else "0",
     ir_submit_deps,
     ir_submit_plain,

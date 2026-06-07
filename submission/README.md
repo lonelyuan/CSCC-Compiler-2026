@@ -53,7 +53,8 @@ SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 
 
 `smoke_test.sh` passes `COMPILER2026_DAG_THREADS`,
 `COMPILER2026_DAG_PROFILE`, `COMPILER2026_TASK_BATCH`, and
-`COMPILER2026_ASYNC_MIN_B` / `COMPILER2026_ASYNC_MIN_BLOCKS` through to the
+`COMPILER2026_ASYNC_MIN_B` / `COMPILER2026_ASYNC_MIN_BLOCKS`,
+`COMPILER2026_DAG_MAX_LIVE`, and `COMPILER2026_DAG_PIN_WORKERS` through to the
 contestant binary, so small verifier runs can exercise the same runtime knobs
 as benchmarks.
 
@@ -127,6 +128,10 @@ to submit `trsm/madd` into the cross-panel DAG. This reduces extra cholesky
 tasks and remains opt-in until verifier and repeat benchmark data justify a
 default change.
 
+`COMPILER2026_DAG_PIN_WORKERS=1` is a Linux-only opt-in runtime experiment that
+pins worker threads to CPUs from the current process affinity mask. It is
+intended for target-platform NUMA/affinity testing and is off by default.
+
 Package artifacts:
 
 ```bash
@@ -171,6 +176,9 @@ Current implementation:
 - `COMPILER2026_DAG_MAX_LIVE` is an opt-in live-window control for that
   experimental path; it is intended for target-platform tuning, not as a new
   default.
+- `COMPILER2026_DAG_PIN_WORKERS=1` optionally pins runtime worker threads on
+  Linux. The runtime reads the process affinity mask and ignores the request if
+  pinning is unavailable.
 - `scripts/tune_params.sh` provides an offline wrapper around `benchmark.sh` for
   environment-specific threshold/batch/thread sweeps. Runtime defaults remain
   deterministic and cheap during contestant execution.

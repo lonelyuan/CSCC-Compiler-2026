@@ -174,22 +174,31 @@ for row in rows:
         row["async_min_b"],
         row.get("async_min_blocks", "2"),
         row.get("dag_max_live", "0"),
+        row.get("dag_pin_workers", "0"),
         row["task_batch"],
         row["threads"],
     )
     groups.setdefault(key, []).append(row)
 
-for async_min_b, async_min_blocks, dag_max_live, task_batch, threads in sorted(
+for async_min_b, async_min_blocks, dag_max_live, dag_pin_workers, task_batch, threads in sorted(
     groups,
     key=lambda item: (
-        sort_key(item[4]),
+        sort_key(item[5]),
         sort_key(item[0]),
         sort_key(item[1]),
         sort_key(item[2]),
         sort_key(item[3]),
+        sort_key(item[4]),
     ),
 ):
-    group_rows = groups[(async_min_b, async_min_blocks, dag_max_live, task_batch, threads)]
+    group_rows = groups[(
+        async_min_b,
+        async_min_blocks,
+        dag_max_live,
+        dag_pin_workers,
+        task_batch,
+        threads,
+    )]
     speedups = [float(row["speedup"]) for row in group_rows]
     positive = [value for value in speedups if value > 0]
     speedup_geo = math.exp(statistics.mean(math.log(value) for value in positive)) if positive else 0.0
@@ -202,6 +211,7 @@ for async_min_b, async_min_blocks, dag_max_live, task_batch, threads in sorted(
         f"async_min_b={async_min_b} "
         f"async_min_blocks={async_min_blocks} "
         f"dag_max_live={dag_max_live} "
+        f"dag_pin_workers={dag_pin_workers} "
         f"task_batch={task_batch} "
         f"runs={len(group_rows)} "
         f"serial_total={serial_total:.6f}s "

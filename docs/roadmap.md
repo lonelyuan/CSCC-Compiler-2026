@@ -91,7 +91,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 当前单锁队列适合验证 IR pass 方向，但不是大核数最终形态。DAG successor 边已经从每个 node 一个小 vector 改为统一 edge pool，减少了 fanout 边的小分配；这降低了当前全局队列模型的构图开销，但不替代 per-worker deque/work stealing。
 
-当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA 绑定。
+当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。`COMPILER2026_DAG_PIN_WORKERS=1` 提供默认关闭的 Linux worker 亲和性实验入口，可在真实目标机上和线程数、NUMA 绑定一起测试；后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA-aware placement。
 
 ## 需要调研的方向
 
