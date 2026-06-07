@@ -555,3 +555,28 @@
 - `LABEL=wait_pressure_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/wait_pressure_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962240s contestant_total=0.643975s speedup_avg=1.522x speedup_geo=1.496x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.880`、`ready_per_thread_avg=20.220`、`dag_edges_avg=4648.5`、`dag_satisfied_deps_avg=7311.5`、`dag_missing_deps=0`、`dag_release_batches_avg=300.0`、`max_dag_release_batch=78`、`max_dag_live=486`、`main_wait_ms_avg=1.024`、`wait_ms_avg=44.950`、`wait_ready_avg=66.716`、`wait_active_avg=8.046`、`wait_dag_live_avg=88.303`、`max_wait_dag_live=486`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 recursive GEP key recovery
+
+改动：
+
+- Pass 的 block key 恢复拆出 `buildLinearElementOffset`，在 strip pointer casts 后递归累加嵌套一维 `GEPOperator` 的 element offset。
+- `buildBlockKey` 统一把 offset 转到 pointer-size integer 后再计算 `offset / b`，直接一维 GEP 的语义保持不变。
+- 多维或无法线性化的地址表达式仍然返回失败，沿用原来的普通 submit/wait fallback。
+
+经验：
+
+- 公开 baseline 的 O2 IR 当前仍是直接一维 GEP，因此本轮不是性能调参；价值在于降低后续 loop/GEP canonicalization 变化导致依赖提交退化的风险。
+- 递归累加只覆盖同一线性 buffer 上的 GEP 链，不假装完成二维坐标或读写集合分析。跨 panel DAG 仍需要单独恢复 `row/panel` 坐标并重新验证正确性。
+- IR smoke 仍显示 `submit_deps=2`、`submit_plain=0`、`wait_calls=1`，说明公开路径没有因重构退化到普通 submit。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.817x`。
+- `LABEL=recursive_gep_key_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/recursive_gep_key_smoke.csv`。
+- 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.958378s contestant_total=0.648671s speedup_avg=1.509x speedup_geo=1.481x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.234`、`ready_per_thread_avg=20.308`、`dag_edges_avg=4530.2`、`dag_satisfied_deps_avg=7429.8`、`dag_missing_deps=0`、`dag_release_batches_avg=295.2`、`max_dag_release_batch=108`、`max_dag_live=504`、`wait_dag_live_avg=88.756`、`max_wait_dag_live=487`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

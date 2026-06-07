@@ -255,16 +255,39 @@ void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime
     call->eraseFromParent();
 }
 
-std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Value *ptr,
-                                           llvm::Value *b) {
+std::optional<llvm::Value *> buildLinearElementOffset(llvm::IRBuilder<> &builder,
+                                                      llvm::Value *ptr,
+                                                      llvm::Type *offset_ty) {
     auto *gep = llvm::dyn_cast<llvm::GEPOperator>(ptr->stripPointerCasts());
     if (gep == nullptr || gep->getNumIndices() != 1) {
         return std::nullopt;
     }
 
-    llvm::Value *offset = gep->getOperand(1);
-    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, offset->getType());
-    llvm::Value *element_block = builder.CreateSDiv(offset, wide_b);
+    llvm::Value *offset = builder.CreateSExtOrTrunc(gep->getOperand(1), offset_ty);
+    llvm::Value *base = gep->getPointerOperand()->stripPointerCasts();
+    if (llvm::isa<llvm::GEPOperator>(base)) {
+        std::optional<llvm::Value *> base_offset =
+            buildLinearElementOffset(builder, base, offset_ty);
+        if (!base_offset) {
+            return std::nullopt;
+        }
+        offset = builder.CreateAdd(*base_offset, offset);
+    }
+    return offset;
+}
+
+std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Value *ptr,
+                                           llvm::Value *b) {
+    llvm::Module *module = builder.GetInsertBlock()->getModule();
+    llvm::Type *offset_ty = llvm::IntegerType::get(
+        module->getContext(), module->getDataLayout().getPointerSizeInBits());
+    std::optional<llvm::Value *> offset = buildLinearElementOffset(builder, ptr, offset_ty);
+    if (!offset) {
+        return std::nullopt;
+    }
+
+    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, (*offset)->getType());
+    llvm::Value *element_block = builder.CreateSDiv(*offset, wide_b);
     return builder.CreateTruncOrBitCast(element_block, builder.getInt32Ty());
 }
 

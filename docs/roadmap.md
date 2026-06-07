@@ -104,7 +104,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 ## 当前瓶颈
 
 - Panel 末尾 barrier 仍过保守，限制大核数可扩展性。
-- Pass 已有一版基于一维 `GEPOperator` offset 的 block key 恢复，但还不是通用数组子块坐标和读写集合分析。
+- Pass 已有一版基于一维 `GEPOperator` offset 的 block key 恢复，并支持递归累加嵌套一维 GEP offset，但还不是通用数组子块坐标和读写集合分析。
 - Runtime 仍以单全局队列为核心，虽然已有批量提交/出队缓解，扩展到 32 核以上仍可能出现锁竞争。
 - 阈值仍来自经验测试；async 入口已由 runtime predicate 按 block size、block count 和 thread count 控制，默认 task batch 已开始参考 block count/thread count，runtime 和 benchmark 已能记录 profile，但尚未形成跨运行的 profile-guided heuristic。
 
