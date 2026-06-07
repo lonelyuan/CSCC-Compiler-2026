@@ -68,10 +68,11 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 
 For thread sweeps, benchmark output directories are split by
 `threads_<count>` and the terminal summary groups suite/profile statistics by
-the `threads` CSV column. After a successful run, `benchmark.sh` removes the
-large per-suite input/output/profile directories by default and keeps the CSV,
-IR, and binaries. Set `COMPILER2026_BENCH_KEEP_ARTIFACTS=1` when you need the
-per-run files for debugging.
+the `threads` CSV column. The terminal summary also reports speedup P50/P95 for
+each suite and overall group. After a successful run, `benchmark.sh` removes
+the large per-suite input/output/profile directories by default and keeps the
+CSV, IR, and binaries. Set `COMPILER2026_BENCH_KEEP_ARTIFACTS=1` when you need
+the per-run files for debugging.
 
 Run an offline parameter sweep for target-platform tuning:
 

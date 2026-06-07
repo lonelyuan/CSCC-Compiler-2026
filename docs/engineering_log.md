@@ -884,3 +884,22 @@
 - `LABEL=benchmark_artifact_cleanup_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/benchmark_artifact_cleanup_smoke.csv`；脚本输出 `cleaned_artifacts=/root/bisheng/build/optimization_benchmarks/benchmark_artifact_cleanup_smoke`，且命令验证 CSV 存在、同名 artifact 目录不存在。
 - `LABEL=benchmark_artifact_keep_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_BENCH_KEEP_ARTIFACTS=1 ./submission/scripts/benchmark.sh` 在 VM 通过，脚本输出 `kept_artifacts=...`，命令验证同名 artifact 目录存在，目录大小约 `633M`；验证后手动删除该临时目录。
 - `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过。
+
+## 2026-06-08 benchmark percentile summary
+
+改动：
+
+- `submission/scripts/benchmark.sh` 的 terminal summary 在 suite 分组和 overall 分组中增加 `speedup_p50` / `speedup_p95`。
+- CSV schema 不变；percentile 只用于人读 summary，避免为单次格式改动扩大数据面。
+- 同步 README、路线图和性能记录，并归档 `docs/benchmark_results/benchmark_percentile_summary_smoke.csv`。
+
+经验：
+
+- 当前 profile 基础设施已经足够支撑大方向判断；P50/P95 属于 benchmark 汇总可读性补强，不应继续演化成更多热路径 profile 字段。
+- 试过把 cached `profiling` bool 传入 `completeDagTasksLocked`，减少完成路径中的 atomic load，但在当前默认路径上没有收益；`release_profile_flag_repeat3` 的 `contestant_total=1.856469s`、`speedup_geo=1.612x`，差于 `successor_edge_pool_repeat3` 的 `1.780286s`，改动未保留。
+
+验证：
+
+- `LABEL=benchmark_percentile_summary_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/benchmark_percentile_summary_smoke.csv`；overall summary 输出 `speedup_p50=1.707x`、`speedup_p95=1.879x`。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 cached profiling flag 实验前通过 verifier，speedup `1.626x`。
+- `LABEL=release_profile_flag_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过但性能未达保留标准，改动已回退。

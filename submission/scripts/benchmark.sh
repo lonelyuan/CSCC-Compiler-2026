@@ -357,6 +357,20 @@ path = sys.argv[1]
 rows = list(csv.DictReader(open(path)))
 print(f"csv={path}")
 
+def percentile(values, pct):
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * pct / 100.0
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[int(rank)]
+    weight = rank - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
 def thread_sort_key(value):
     try:
         return (0, int(value))
@@ -374,7 +388,9 @@ for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
             f"threads={threads} {suite}: "
             f"serial_avg={statistics.mean(serial):.6f}s "
             f"contestant_avg={statistics.mean(contestant):.6f}s "
-            f"speedup_avg={statistics.mean(vals):.3f}x"
+            f"speedup_avg={statistics.mean(vals):.3f}x "
+            f"speedup_p50={percentile(vals, 50):.3f}x "
+            f"speedup_p95={percentile(vals, 95):.3f}x"
         )
     first = thread_rows[0]
     print(
@@ -403,7 +419,9 @@ for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
         f"serial_total={serial_total:.6f}s "
         f"contestant_total={contestant_total:.6f}s "
         f"speedup_avg={statistics.mean(speedups):.3f}x "
-        f"speedup_geo={speedup_geo:.3f}x"
+        f"speedup_geo={speedup_geo:.3f}x "
+        f"speedup_p50={percentile(speedups, 50):.3f}x "
+        f"speedup_p95={percentile(speedups, 95):.3f}x"
     )
 if rows and any(r.get("profile_enabled") == "1" for r in rows):
     for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
