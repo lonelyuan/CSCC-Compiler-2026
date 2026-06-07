@@ -482,7 +482,7 @@ writes block(row, col)
 
 本项目现在采用两阶段调参策略：
 
-- 事前离线调参：`submission/scripts/tune_params.sh` 遍历 async 阈值、task batch 和线程数，复用 `benchmark.sh` 的 verifier、IR 计数和 profile CSV，生成 aggregate CSV，作为真实平台默认参数的依据。
+- 事前离线调参：`submission/scripts/tune_params.sh` 遍历 async 阈值、最小 block 数、task batch、live-window 和线程数，复用 `benchmark.sh` 的 verifier、IR 计数和 profile CSV，生成 aggregate CSV，作为真实平台默认参数的依据。
 - 运行时廉价选择：contestant 执行路径只根据 `n, b, block_count, thread_count` 和显式环境变量做 deterministic 决策，不在被计时路径中试跑多个参数。
 
 这样可以利用 profile 基础设施，又避免自动调优本身吞掉计时预算或对单次 judge 输入过拟合。

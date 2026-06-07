@@ -929,3 +929,26 @@
 - `LABEL=live_window_default_repeat3_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/live_window_default_repeat3_final.csv`；summary 为 `runs=12 serial_total=2.982439s contestant_total=1.769841s speedup_avg=1.674x speedup_geo=1.657x speedup_p50=1.712x speedup_p95=1.934x`。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=<512|1024|2048|4096> LABEL=cross_panel_live*_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，候选 CSV 已归档；最佳候选未超过默认 repeat=3，因此未切默认。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_live2048_profile_final_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_live2048_profile_final_smoke.csv`；profile 包含 `max_dag_live=2050`、`max_wait_dag_live=2046`、`dag_missing_deps=7595`。
+
+## 2026-06-08 tune wrapper min-block and live-window dimensions
+
+改动：
+
+- `benchmark.sh` 的 CSV 新增 `dag_max_live` 字段，用于记录本次运行是否启用了 live-window drain；终端 summary 逻辑不变。
+- `tune_params.sh` 新增 `COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST` 和 `COMPILER2026_TUNE_DAG_MAX_LIVE_LIST`，与既有 `async_min_b`、`task_batch`、线程数一起组合 sweep。
+- 新增维度默认分别取当前 `COMPILER2026_ASYNC_MIN_BLOCKS` / `COMPILER2026_DAG_MAX_LIVE` 单值，因此默认 sweep 规模不扩大；只有显式设置列表时才探索更多组合。
+- `tune_summary` 分组从 `threads + async_min_b + task_batch` 扩展为 `threads + async_min_b + async_min_blocks + dag_max_live + task_batch`。
+
+经验：
+
+- 参数优化确实和执行环境相关；本轮复测显示当前 4 vCPU VM 上 `task_batch=4/16`、`async_min_b=20/22` 和 `threads=5` 都没有超过当前默认。调参工具应覆盖这些维度，但默认不应因为单次实验随意改动。
+- 尝试过在 live-window 模式下按 output key 给 ready queue 做优先级，`COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 SPEC_START=91 SPEC_END=104` smoke 虽通过 verifier，但 speedup 降到 `1.316x`，说明线性 block key 不是可靠关键路径优先级，改动未保留。
+- 尝试过把 DAG release 后的 `notify_all` 改为按 released 数量 `notify_one`，并把通知移出 mutex；两组 repeat=3 的 contestant total 分别为 `1.771000s` 和 `1.786654s`，没有稳定超过 `live_window_default_repeat3_final` 的 `1.769841s`，改动未保留。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2,3 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0,2048 COMPILER2026_TUNE_TASK_BATCH_LIST=auto REPEAT=1 ./submission/scripts/tune_params.sh` 展开 4 个组合，不触发 build/benchmark。
+- VM 单组合 wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_blocks_live_smoke REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_blocks_live_smoke_aggregate.csv`；summary 为 `threads=4 async_min_b=18 async_min_blocks=2 dag_max_live=0 task_batch=auto runs=4 serial_total=0.992355s contestant_total=0.588954s speedup_geo=1.649x dag_missing_deps=0`。
+- `LABEL=tune_dims_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/tune_dims_default_repeat3.csv`；summary 为 `runs=12 serial_total=2.934934s contestant_total=1.764788s speedup_avg=1.654x speedup_geo=1.637x speedup_p50=1.673x speedup_p95=1.932x`，用于验证新 CSV schema，不替代当前最佳 geomean 记录。

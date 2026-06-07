@@ -9,10 +9,11 @@ BENCH_DIR="${BENCH_DIR:-${REPO_ROOT}/build/optimization_benchmarks}"
 LABEL_PREFIX="${COMPILER2026_TUNE_LABEL_PREFIX:-param_sweep}"
 THREAD_LIST="${COMPILER2026_TUNE_THREAD_LIST:-${COMPILER2026_DAG_THREAD_LIST:-${COMPILER2026_DAG_THREADS:-1,2,4}}}"
 ASYNC_MIN_B_LIST="${COMPILER2026_TUNE_ASYNC_MIN_B_LIST:-18,24,32,48}"
+ASYNC_MIN_BLOCKS_LIST="${COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST:-${COMPILER2026_ASYNC_MIN_BLOCKS:-2}}"
 TASK_BATCH_LIST="${COMPILER2026_TUNE_TASK_BATCH_LIST:-auto,4,8}"
+DAG_MAX_LIVE_LIST="${COMPILER2026_TUNE_DAG_MAX_LIVE_LIST:-${COMPILER2026_DAG_MAX_LIVE:-0}}"
 REPEAT="${REPEAT:-1}"
 PROFILE="${COMPILER2026_DAG_PROFILE:-${COMPILER2026_TUNE_PROFILE:-0}}"
-DAG_MAX_LIVE="${COMPILER2026_DAG_MAX_LIVE:-0}"
 DRY_RUN="${COMPILER2026_TUNE_DRY_RUN:-0}"
 
 parse_list() {
@@ -30,6 +31,15 @@ require_positive_int() {
   fi
 }
 
+require_nonnegative_int() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "invalid ${name} entry: ${value}" >&2
+    exit 2
+  fi
+}
+
 sanitize_label_part() {
   local value="$1"
   value="${value//[^A-Za-z0-9._-]/_}"
@@ -40,8 +50,12 @@ parse_list "${THREAD_LIST}"
 THREAD_VALUES=("${PARSED_LIST[@]}")
 parse_list "${ASYNC_MIN_B_LIST}"
 ASYNC_MIN_B_VALUES=("${PARSED_LIST[@]}")
+parse_list "${ASYNC_MIN_BLOCKS_LIST}"
+ASYNC_MIN_BLOCKS_VALUES=("${PARSED_LIST[@]}")
 parse_list "${TASK_BATCH_LIST}"
 TASK_BATCH_VALUES=("${PARSED_LIST[@]}")
+parse_list "${DAG_MAX_LIVE_LIST}"
+DAG_MAX_LIVE_VALUES=("${PARSED_LIST[@]}")
 
 if [[ "${#THREAD_VALUES[@]}" -eq 0 ]]; then
   echo "empty COMPILER2026_TUNE_THREAD_LIST" >&2
@@ -55,6 +69,14 @@ if [[ "${#TASK_BATCH_VALUES[@]}" -eq 0 ]]; then
   echo "empty COMPILER2026_TUNE_TASK_BATCH_LIST" >&2
   exit 2
 fi
+if [[ "${#ASYNC_MIN_BLOCKS_VALUES[@]}" -eq 0 ]]; then
+  echo "empty COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST" >&2
+  exit 2
+fi
+if [[ "${#DAG_MAX_LIVE_VALUES[@]}" -eq 0 ]]; then
+  echo "empty COMPILER2026_TUNE_DAG_MAX_LIVE_LIST" >&2
+  exit 2
+fi
 
 for thread_value in "${THREAD_VALUES[@]}"; do
   require_positive_int "COMPILER2026_TUNE_THREAD_LIST" "${thread_value}"
@@ -62,10 +84,16 @@ done
 for min_b in "${ASYNC_MIN_B_VALUES[@]}"; do
   require_positive_int "COMPILER2026_TUNE_ASYNC_MIN_B_LIST" "${min_b}"
 done
+for min_blocks in "${ASYNC_MIN_BLOCKS_VALUES[@]}"; do
+  require_positive_int "COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST" "${min_blocks}"
+done
 for batch in "${TASK_BATCH_VALUES[@]}"; do
   if [[ "${batch}" != "auto" ]]; then
     require_positive_int "COMPILER2026_TUNE_TASK_BATCH_LIST" "${batch}"
   fi
+done
+for max_live in "${DAG_MAX_LIVE_VALUES[@]}"; do
+  require_nonnegative_int "COMPILER2026_TUNE_DAG_MAX_LIVE_LIST" "${max_live}"
 done
 
 mkdir -p "${BENCH_DIR}"
@@ -78,41 +106,48 @@ THREADS_JOINED="$(IFS=,; echo "${THREAD_VALUES[*]}")"
 echo "tune_label_prefix=${SAFE_PREFIX}"
 echo "threads=${THREADS_JOINED}"
 echo "async_min_b_list=$(IFS=,; echo "${ASYNC_MIN_B_VALUES[*]}")"
+echo "async_min_blocks_list=$(IFS=,; echo "${ASYNC_MIN_BLOCKS_VALUES[*]}")"
 echo "task_batch_list=$(IFS=,; echo "${TASK_BATCH_VALUES[*]}")"
+echo "dag_max_live_list=$(IFS=,; echo "${DAG_MAX_LIVE_VALUES[*]}")"
 echo "repeat=${REPEAT}"
 echo "profile=${PROFILE}"
 echo "aggregate_csv=${AGGREGATE_CSV}"
 
 for min_b in "${ASYNC_MIN_B_VALUES[@]}"; do
-  for batch in "${TASK_BATCH_VALUES[@]}"; do
-    batch_label="$(sanitize_label_part "${batch}")"
-    label="${SAFE_PREFIX}_b${min_b}_batch${batch_label}"
-    csv="${BENCH_DIR}/${label}.csv"
+  for min_blocks in "${ASYNC_MIN_BLOCKS_VALUES[@]}"; do
+    for max_live in "${DAG_MAX_LIVE_VALUES[@]}"; do
+      for batch in "${TASK_BATCH_VALUES[@]}"; do
+        batch_label="$(sanitize_label_part "${batch}")"
+        label="${SAFE_PREFIX}_b${min_b}_blocks${min_blocks}_live${max_live}_batch${batch_label}"
+        csv="${BENCH_DIR}/${label}.csv"
 
-    echo "running label=${label} async_min_b=${min_b} task_batch=${batch} threads=${THREADS_JOINED}"
-    if [[ "${DRY_RUN}" != "0" ]]; then
-      continue
-    fi
+        echo "running label=${label} async_min_b=${min_b} async_min_blocks=${min_blocks} dag_max_live=${max_live} task_batch=${batch} threads=${THREADS_JOINED}"
+        if [[ "${DRY_RUN}" != "0" ]]; then
+          continue
+        fi
 
-    COMPILER2026_DAG_THREAD_LIST="${THREADS_JOINED}" \
-      COMPILER2026_ASYNC_MIN_B="${min_b}" \
-      COMPILER2026_TASK_BATCH="${batch}" \
-      COMPILER2026_DAG_PROFILE="${PROFILE}" \
-      COMPILER2026_DAG_MAX_LIVE="${DAG_MAX_LIVE}" \
-      LABEL="${label}" \
-      REPEAT="${REPEAT}" \
-      "${SCRIPT_DIR}/benchmark.sh"
+        COMPILER2026_DAG_THREAD_LIST="${THREADS_JOINED}" \
+          COMPILER2026_ASYNC_MIN_B="${min_b}" \
+          COMPILER2026_ASYNC_MIN_BLOCKS="${min_blocks}" \
+          COMPILER2026_TASK_BATCH="${batch}" \
+          COMPILER2026_DAG_PROFILE="${PROFILE}" \
+          COMPILER2026_DAG_MAX_LIVE="${max_live}" \
+          LABEL="${label}" \
+          REPEAT="${REPEAT}" \
+          "${SCRIPT_DIR}/benchmark.sh"
 
-    if [[ ! -f "${csv}" ]]; then
-      echo "missing expected benchmark csv: ${csv}" >&2
-      exit 1
-    fi
+        if [[ ! -f "${csv}" ]]; then
+          echo "missing expected benchmark csv: ${csv}" >&2
+          exit 1
+        fi
 
-    if [[ ! -f "${AGGREGATE_CSV}" ]]; then
-      cp "${csv}" "${AGGREGATE_CSV}"
-    else
-      tail -n +2 "${csv}" >> "${AGGREGATE_CSV}"
-    fi
+        if [[ ! -f "${AGGREGATE_CSV}" ]]; then
+          cp "${csv}" "${AGGREGATE_CSV}"
+        else
+          tail -n +2 "${csv}" >> "${AGGREGATE_CSV}"
+        fi
+      done
+    done
   done
 done
 
@@ -135,11 +170,26 @@ def sort_key(value):
 
 groups = {}
 for row in rows:
-    key = (row["async_min_b"], row["task_batch"], row["threads"])
+    key = (
+        row["async_min_b"],
+        row.get("async_min_blocks", "2"),
+        row.get("dag_max_live", "0"),
+        row["task_batch"],
+        row["threads"],
+    )
     groups.setdefault(key, []).append(row)
 
-for async_min_b, task_batch, threads in sorted(groups, key=lambda item: (sort_key(item[2]), sort_key(item[0]), sort_key(item[1]))):
-    group_rows = groups[(async_min_b, task_batch, threads)]
+for async_min_b, async_min_blocks, dag_max_live, task_batch, threads in sorted(
+    groups,
+    key=lambda item: (
+        sort_key(item[4]),
+        sort_key(item[0]),
+        sort_key(item[1]),
+        sort_key(item[2]),
+        sort_key(item[3]),
+    ),
+):
+    group_rows = groups[(async_min_b, async_min_blocks, dag_max_live, task_batch, threads)]
     speedups = [float(row["speedup"]) for row in group_rows]
     positive = [value for value in speedups if value > 0]
     speedup_geo = math.exp(statistics.mean(math.log(value) for value in positive)) if positive else 0.0
@@ -150,6 +200,8 @@ for async_min_b, task_batch, threads in sorted(groups, key=lambda item: (sort_ke
         "tune_summary: "
         f"threads={threads} "
         f"async_min_b={async_min_b} "
+        f"async_min_blocks={async_min_blocks} "
+        f"dag_max_live={dag_max_live} "
         f"task_batch={task_batch} "
         f"runs={len(group_rows)} "
         f"serial_total={serial_total:.6f}s "

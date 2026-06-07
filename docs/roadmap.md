@@ -20,7 +20,7 @@
 
 结论不要只看单点 speedup，应使用几何平均和分层统计，避免对公开样例或 4 核 VM 过拟合。
 
-当前 `benchmark.sh` 已支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 这类多线程扫参入口，并按线程分组输出 summary；terminal summary 现在同时给出 speedup P50/P95，便于先看分布再决定是否复测。成功运行后默认清理 per-suite 临时大文件，避免长时间 sweep 撑满 VM 磁盘。`tune_params.sh` 在其外层补充 `async_min_b × task_batch` 离线扫参，并汇总 aggregate CSV。真实鲲鹏平台上可直接把线程列表扩展到 `1,2,4,8,16,32,48,64`，再结合 profile CSV 的 ready width、wait pressure 和 queue/exec 时间判断默认阈值是否需要重设。
+当前 `benchmark.sh` 已支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 这类多线程扫参入口，并按线程分组输出 summary；terminal summary 现在同时给出 speedup P50/P95，便于先看分布再决定是否复测。成功运行后默认清理 per-suite 临时大文件，避免长时间 sweep 撑满 VM 磁盘。`tune_params.sh` 在其外层补充 `async_min_b × async_min_blocks × task_batch × dag_max_live` 离线扫参，并汇总 aggregate CSV；后两类维度默认是单值，只有显式设置列表才扩展组合空间。真实鲲鹏平台上可直接把线程列表扩展到 `1,2,4,8,16,32,48,64`，再结合 profile CSV 的 ready width、wait pressure 和 queue/exec 时间判断默认阈值是否需要重设。
 
 ## Pass 演进方向
 
@@ -76,7 +76,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 当前已具备第一版 profiling 开关：`COMPILER2026_DAG_PROFILE=1` 会输出 async path 判定次数和原因、task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、批量出队、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/fanout/live 信息，以及按 Pass 注册名称聚合的 `trsm/madd` 统计。benchmark 脚本已经能把这些统计沉淀为 CSV 字段，并派生 `ready_avg` / `ready_per_thread` 观察 ready 宽度是否足以覆盖线程数，派生 `wait_ready_avg` / `wait_active_avg` / `wait_dag_live_avg` 观察 panel barrier 入口仍有多少可执行或未完成工作。Pass 入口已经改为 runtime predicate，`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 和 `COMPILER2026_DAG_THREADS` 能真实控制 async path；默认 task batch 也已开始参考 `b`、block 数和线程数，避免小 panel 过度批量出队。后续可以继续把这些 profile 数据用于驱动默认异步阈值、未来 range task 和跨 panel DAG 的收益判断。
 
-短期调参策略是“事前离线搜索，运行时廉价决策”：`tune_params.sh` 负责在目标机器上系统扫阈值、batch 和线程数；contestant 运行时只根据 `n, b, block_count, thread_count` 做 deterministic heuristic，不在被计时执行中做 warmup 或多参数计时搜索。
+短期调参策略是“事前离线搜索，运行时廉价决策”：`tune_params.sh` 负责在目标机器上系统扫阈值、最小 block 数、batch、live-window 和线程数；contestant 运行时只根据 `n, b, block_count, thread_count` 做 deterministic heuristic，不在被计时执行中做 warmup 或多参数计时搜索。
 
 ### 4. 多核和 NUMA 亲和性
 
