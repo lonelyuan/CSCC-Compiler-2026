@@ -303,7 +303,7 @@ void compiler2026_runtime_end();
 - queue/DAG reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销；默认批量会根据 block 数和线程数收窄，避免小 panel 下过度批量影响负载均衡。
-- 可选输出 task 数、队列等待、执行时间、worker idle、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放/live 等 profile 指标。
+- 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放/live 等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 
 benchmark 脚本会把这些 profile 行解析进 CSV，并记录 auto 模式下实际生效的 runtime batch。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。

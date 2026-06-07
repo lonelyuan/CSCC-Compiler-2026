@@ -268,8 +268,11 @@ public:
     }
 
     void wait() {
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
         flushPendingTasks();
         if (workers_.empty()) {
+            recordWaitProfile(profiling, wait_enter_ns);
             return;
         }
 
@@ -323,8 +326,10 @@ public:
         if (worker_error_) {
             std::exception_ptr error = worker_error_;
             worker_error_ = nullptr;
+            recordWaitProfile(profiling, wait_enter_ns);
             std::rethrow_exception(error);
         }
+        recordWaitProfile(profiling, wait_enter_ns);
     }
 
 private:
@@ -491,6 +496,15 @@ private:
         ready_width_sum_ += ready;
     }
 
+    void recordWaitProfile(bool profiling, std::uint64_t wait_enter_ns) {
+        if (!profiling) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++wait_calls_;
+        wait_total_ns_ += nowNs() - wait_enter_ns;
+    }
+
     TaskProfile &profileForTaskLocked(TaskFn fn) {
         for (std::size_t i = 0; i < task_profile_count_; ++i) {
             if (task_profiles_[i].fn == fn) {
@@ -542,6 +556,8 @@ private:
         total_exec_ns_ = 0;
         worker_idle_ns_ = 0;
         main_wait_ns_ = 0;
+        wait_total_ns_ = 0;
+        wait_calls_ = 0;
         submit_flushes_ = 0;
         dequeue_batches_ = 0;
         profile_dag_nodes_ = 0;
@@ -576,7 +592,7 @@ private:
                      "dag_missing_deps=%llu dag_initial_ready=%llu "
                      "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
                      "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
-                     "main_wait_ms=%.3f\n",
+                     "main_wait_ms=%.3f wait_calls=%llu wait_ms=%.3f\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
                      static_cast<unsigned long long>(main_tasks_),
@@ -596,7 +612,9 @@ private:
                      static_cast<double>(total_queue_ns_) / 1000000.0,
                      static_cast<double>(total_exec_ns_) / 1000000.0,
                      static_cast<double>(worker_idle_ns_) / 1000000.0,
-                     static_cast<double>(main_wait_ns_) / 1000000.0);
+                     static_cast<double>(main_wait_ns_) / 1000000.0,
+                     static_cast<unsigned long long>(wait_calls_),
+                     static_cast<double>(wait_total_ns_) / 1000000.0);
 
         for (std::size_t i = 0; i < task_profile_count_; ++i) {
             const TaskProfile &profile = task_profiles_[i];
@@ -640,6 +658,8 @@ private:
     std::uint64_t total_exec_ns_ = 0;
     std::uint64_t worker_idle_ns_ = 0;
     std::uint64_t main_wait_ns_ = 0;
+    std::uint64_t wait_total_ns_ = 0;
+    std::uint64_t wait_calls_ = 0;
     std::uint64_t submit_flushes_ = 0;
     std::uint64_t dequeue_batches_ = 0;
     std::uint64_t profile_dag_nodes_ = 0;

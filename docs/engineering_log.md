@@ -459,3 +459,27 @@
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962757s contestant_total=0.646104s speedup_avg=1.514x speedup_geo=1.486x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=82.026`、`ready_per_thread_avg=20.506`、`dag_edges_avg=4847.8`、`dag_satisfied_deps_avg=7112.2`、`dag_missing_deps=0`、`max_dag_live=504`。
 - CSV 显示本轮 auto batch 已按 suite 收窄：`n512_576 runtime_batch_max=4`、`n768 runtime_batch_max=4`、`n1024 runtime_batch_max=4`、`n1152_small_b runtime_batch_max=16`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 wait span profile
+
+改动：
+
+- runtime profile 新增 `wait_calls` 和 `wait_ms`，记录 profile 期间 `compiler2026_runtime_wait()` 的调用次数和总 wall time。
+- benchmark CSV 新增 `wait_calls` 和 `wait_ms` 字段，并在 profile summary 中输出 `wait_ms_avg`。
+- 归档 `wait_span_profile_smoke.csv`，确认该字段从 runtime stderr 到 CSV 和 summary 全链路可用。
+
+经验：
+
+- `main_wait_ms` 只记录主线程在 wait 中没有 ready task 可执行时的空等时间；`wait_ms` 记录整个 wait 区间，可以更直接量化 panel barrier 和最终 `runtime_end()` wait 的调度轮廓。
+- `wait_calls` 能帮助区分“少量长 wait”和“很多短 wait”。后续替换 panel 末尾 barrier 或引入跨 panel DAG 时，应同时看 `wait_calls`、`wait_ms`、`main_wait_ms`、`worker_idle_ms` 和 verifier。
+- 本轮只增加 profile 观测，不改变 wait 语义，也不减少 panel 间 barrier。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.810x`。
+- `LABEL=wait_span_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/wait_span_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.967136s contestant_total=0.640435s speedup_avg=1.532x speedup_geo=1.508x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.403`、`ready_per_thread_avg=20.351`、`dag_edges_avg=4647.8`、`dag_satisfied_deps_avg=7312.2`、`dag_missing_deps=0`、`max_dag_live=486`、`main_wait_ms_avg=1.457`、`wait_ms_avg=45.063`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
