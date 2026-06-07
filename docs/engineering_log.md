@@ -952,3 +952,24 @@
 - 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2,3 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0,2048 COMPILER2026_TUNE_TASK_BATCH_LIST=auto REPEAT=1 ./submission/scripts/tune_params.sh` 展开 4 个组合，不触发 build/benchmark。
 - VM 单组合 wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_blocks_live_smoke REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_blocks_live_smoke_aggregate.csv`；summary 为 `threads=4 async_min_b=18 async_min_blocks=2 dag_max_live=0 task_batch=auto runs=4 serial_total=0.992355s contestant_total=0.588954s speedup_geo=1.649x dag_missing_deps=0`。
 - `LABEL=tune_dims_default_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/tune_dims_default_repeat3.csv`；summary 为 `runs=12 serial_total=2.934934s contestant_total=1.764788s speedup_avg=1.654x speedup_geo=1.637x speedup_p50=1.673x speedup_p95=1.932x`，用于验证新 CSV schema，不替代当前最佳 geomean 记录。
+
+## 2026-06-08 DAG first-touch dependency profile
+
+改动：
+
+- runtime profile 新增 `dag_first_touch_deps`，用于统计依赖 key 尚未由当前 DAG 中任何 task 输出过的缺失 producer。
+- `dag_missing_deps` 保留原有总数语义；`dag_first_touch_deps` 是其中可解释为原始输入块 first-touch 的子集。
+- 该统计只在 `COMPILER2026_DAG_PROFILE=1` 下维护 `profile_output_keys_`，默认计时路径不做额外 set 查询。
+- `benchmark.sh` CSV 和 profile summary 解析同步新增 `dag_first_touch_deps` 字段。
+
+经验：
+
+- 之前跨 panel profile 中 `dag_missing_deps=7595` 容易被误读为依赖丢失。新字段显示 `dag_first_touch_deps=7595`，说明这些缺失 producer 全部来自原始输入块 first-touch，不是 runtime 在同一 DAG 中遗失 producer。
+- 这不改变调度行为，也不让 cross-panel 默认化；它让下一步判断跨 panel 依赖质量时能区分“合法 first touch”和“真正异常 missing producer”。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.635x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=dag_first_touch_cross_panel_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/dag_first_touch_cross_panel_profile_smoke.csv`；summary 包含 `dag_missing_deps=7595 dag_first_touch_deps=7595`。

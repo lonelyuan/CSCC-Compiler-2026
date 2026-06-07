@@ -58,7 +58,10 @@ contestant binary, so small verifier runs can exercise the same runtime knobs
 as benchmarks.
 
 When the same profile flag is used with `benchmark.sh`, parsed profile metrics
-are written into the benchmark CSV next to the timing fields:
+are written into the benchmark CSV next to the timing fields. Cross-panel
+experiments also report `dag_first_touch_deps`, so expected first touches of
+original input blocks can be separated from the broader `dag_missing_deps`
+counter:
 
 ```bash
 source /etc/profile.d/bisheng.sh

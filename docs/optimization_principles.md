@@ -306,7 +306,7 @@ void compiler2026_runtime_end();
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销；当前默认批量上限为 `8`，并会根据 block 数和线程数收窄，避免小 panel 下过度批量影响负载均衡。
 - `COMPILER2026_DAG_MAX_LIVE` 提供默认关闭的 live-window drain：跨 panel 实验中如果 live DAG 超过窗口且已有 ready task，提交线程会先执行一小批 ready task，降低完整 DAG 的 live pressure。
-- 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/live 等 profile 指标。
+- 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/first-touch 输入依赖/释放批量/live 等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 
 benchmark 脚本会把这些 profile 行解析进 CSV，并记录 auto 模式下实际生效的 runtime batch。它还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数，并按 `threads` 字段分组输出 summary。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。

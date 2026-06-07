@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -141,6 +142,10 @@ public:
         if (reserve_tasks > latest_producer_.bucket_count()) {
             latest_producer_.reserve(reserve_tasks);
         }
+        if (profile_enabled_.load(std::memory_order_relaxed) &&
+            reserve_tasks > profile_output_keys_.bucket_count()) {
+            profile_output_keys_.reserve(reserve_tasks);
+        }
         tasks_.clear();
         dag_nodes_.clear();
         successor_edges_.clear();
@@ -222,6 +227,9 @@ public:
                 if (producer == latest_producer_.end()) {
                     if (profiling) {
                         ++profile_dag_missing_deps_;
+                        if (profile_output_keys_.find(dep) == profile_output_keys_.end()) {
+                            ++profile_dag_first_touch_deps_;
+                        }
                     }
                     continue;
                 }
@@ -258,6 +266,9 @@ public:
 
             if (output >= 0) {
                 latest_producer_[output] = node_index;
+                if (profiling) {
+                    profile_output_keys_.insert(output);
+                }
             }
 
             if (dag_nodes_[node_index].pending == 0) {
@@ -492,6 +503,7 @@ private:
         dag_nodes_.clear();
         successor_edges_.clear();
         latest_producer_.clear();
+        profile_output_keys_.clear();
         pending_dag_tasks_ = 0;
     }
 
@@ -668,6 +680,7 @@ private:
         profile_dag_edges_ = 0;
         profile_dag_satisfied_deps_ = 0;
         profile_dag_missing_deps_ = 0;
+        profile_dag_first_touch_deps_ = 0;
         profile_dag_initial_ready_ = 0;
         profile_dag_released_ = 0;
         dag_release_batches_ = 0;
@@ -698,7 +711,8 @@ private:
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
                      "ready_samples=%llu ready_sum=%llu "
                      "dag_nodes=%llu dag_edges=%llu dag_satisfied_deps=%llu "
-                     "dag_missing_deps=%llu dag_initial_ready=%llu "
+                     "dag_missing_deps=%llu dag_first_touch_deps=%llu "
+                     "dag_initial_ready=%llu "
                      "dag_released=%llu dag_release_batches=%llu "
                      "max_dag_release_batch=%zu max_dag_pending=%zu max_dag_successors=%zu "
                      "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
@@ -718,6 +732,7 @@ private:
                      static_cast<unsigned long long>(profile_dag_edges_),
                      static_cast<unsigned long long>(profile_dag_satisfied_deps_),
                      static_cast<unsigned long long>(profile_dag_missing_deps_),
+                     static_cast<unsigned long long>(profile_dag_first_touch_deps_),
                      static_cast<unsigned long long>(profile_dag_initial_ready_),
                      static_cast<unsigned long long>(profile_dag_released_),
                      static_cast<unsigned long long>(dag_release_batches_),
@@ -751,6 +766,7 @@ private:
     std::vector<DagNode> dag_nodes_;
     std::vector<DagEdge> successor_edges_;
     std::unordered_map<int, int> latest_producer_;
+    std::unordered_set<int> profile_output_keys_;
     std::size_t pending_dag_tasks_ = 0;
     std::array<Task, kMaxTaskBatch> pending_tasks_{};
     std::size_t task_head_ = 0;
@@ -789,6 +805,7 @@ private:
     std::uint64_t profile_dag_edges_ = 0;
     std::uint64_t profile_dag_satisfied_deps_ = 0;
     std::uint64_t profile_dag_missing_deps_ = 0;
+    std::uint64_t profile_dag_first_touch_deps_ = 0;
     std::uint64_t profile_dag_initial_ready_ = 0;
     std::uint64_t profile_dag_released_ = 0;
     std::uint64_t dag_release_batches_ = 0;
