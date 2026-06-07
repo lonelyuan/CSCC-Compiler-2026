@@ -12,6 +12,7 @@ ASYNC_MIN_B_LIST="${COMPILER2026_TUNE_ASYNC_MIN_B_LIST:-18,24,32,48}"
 ASYNC_MIN_BLOCKS_LIST="${COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST:-${COMPILER2026_ASYNC_MIN_BLOCKS:-2}}"
 TASK_BATCH_LIST="${COMPILER2026_TUNE_TASK_BATCH_LIST:-auto,4,8}"
 DAG_MAX_LIVE_LIST="${COMPILER2026_TUNE_DAG_MAX_LIVE_LIST:-${COMPILER2026_DAG_MAX_LIVE:-0}}"
+DAG_PIN_WORKERS_LIST="${COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST:-${COMPILER2026_DAG_PIN_WORKERS:-0}}"
 REPEAT="${REPEAT:-1}"
 PROFILE="${COMPILER2026_DAG_PROFILE:-${COMPILER2026_TUNE_PROFILE:-0}}"
 DRY_RUN="${COMPILER2026_TUNE_DRY_RUN:-0}"
@@ -95,6 +96,18 @@ done
 for max_live in "${DAG_MAX_LIVE_VALUES[@]}"; do
   require_nonnegative_int "COMPILER2026_TUNE_DAG_MAX_LIVE_LIST" "${max_live}"
 done
+parse_list "${DAG_PIN_WORKERS_LIST}"
+DAG_PIN_WORKERS_VALUES=("${PARSED_LIST[@]}")
+if [[ "${#DAG_PIN_WORKERS_VALUES[@]}" -eq 0 ]]; then
+  echo "empty COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST" >&2
+  exit 2
+fi
+for pin_workers in "${DAG_PIN_WORKERS_VALUES[@]}"; do
+  if [[ "${pin_workers}" != "0" && "${pin_workers}" != "1" ]]; then
+    echo "invalid COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST entry: ${pin_workers}" >&2
+    exit 2
+  fi
+done
 
 mkdir -p "${BENCH_DIR}"
 SAFE_PREFIX="$(sanitize_label_part "${LABEL_PREFIX}")"
@@ -109,6 +122,7 @@ echo "async_min_b_list=$(IFS=,; echo "${ASYNC_MIN_B_VALUES[*]}")"
 echo "async_min_blocks_list=$(IFS=,; echo "${ASYNC_MIN_BLOCKS_VALUES[*]}")"
 echo "task_batch_list=$(IFS=,; echo "${TASK_BATCH_VALUES[*]}")"
 echo "dag_max_live_list=$(IFS=,; echo "${DAG_MAX_LIVE_VALUES[*]}")"
+echo "dag_pin_workers_list=$(IFS=,; echo "${DAG_PIN_WORKERS_VALUES[*]}")"
 echo "repeat=${REPEAT}"
 echo "profile=${PROFILE}"
 echo "aggregate_csv=${AGGREGATE_CSV}"
@@ -116,36 +130,39 @@ echo "aggregate_csv=${AGGREGATE_CSV}"
 for min_b in "${ASYNC_MIN_B_VALUES[@]}"; do
   for min_blocks in "${ASYNC_MIN_BLOCKS_VALUES[@]}"; do
     for max_live in "${DAG_MAX_LIVE_VALUES[@]}"; do
-      for batch in "${TASK_BATCH_VALUES[@]}"; do
-        batch_label="$(sanitize_label_part "${batch}")"
-        label="${SAFE_PREFIX}_b${min_b}_blocks${min_blocks}_live${max_live}_batch${batch_label}"
-        csv="${BENCH_DIR}/${label}.csv"
+      for pin_workers in "${DAG_PIN_WORKERS_VALUES[@]}"; do
+        for batch in "${TASK_BATCH_VALUES[@]}"; do
+          batch_label="$(sanitize_label_part "${batch}")"
+          label="${SAFE_PREFIX}_b${min_b}_blocks${min_blocks}_live${max_live}_pin${pin_workers}_batch${batch_label}"
+          csv="${BENCH_DIR}/${label}.csv"
 
-        echo "running label=${label} async_min_b=${min_b} async_min_blocks=${min_blocks} dag_max_live=${max_live} task_batch=${batch} threads=${THREADS_JOINED}"
-        if [[ "${DRY_RUN}" != "0" ]]; then
-          continue
-        fi
+          echo "running label=${label} async_min_b=${min_b} async_min_blocks=${min_blocks} dag_max_live=${max_live} dag_pin_workers=${pin_workers} task_batch=${batch} threads=${THREADS_JOINED}"
+          if [[ "${DRY_RUN}" != "0" ]]; then
+            continue
+          fi
 
-        COMPILER2026_DAG_THREAD_LIST="${THREADS_JOINED}" \
-          COMPILER2026_ASYNC_MIN_B="${min_b}" \
-          COMPILER2026_ASYNC_MIN_BLOCKS="${min_blocks}" \
-          COMPILER2026_TASK_BATCH="${batch}" \
-          COMPILER2026_DAG_PROFILE="${PROFILE}" \
-          COMPILER2026_DAG_MAX_LIVE="${max_live}" \
-          LABEL="${label}" \
-          REPEAT="${REPEAT}" \
-          "${SCRIPT_DIR}/benchmark.sh"
+          COMPILER2026_DAG_THREAD_LIST="${THREADS_JOINED}" \
+            COMPILER2026_ASYNC_MIN_B="${min_b}" \
+            COMPILER2026_ASYNC_MIN_BLOCKS="${min_blocks}" \
+            COMPILER2026_TASK_BATCH="${batch}" \
+            COMPILER2026_DAG_PROFILE="${PROFILE}" \
+            COMPILER2026_DAG_MAX_LIVE="${max_live}" \
+            COMPILER2026_DAG_PIN_WORKERS="${pin_workers}" \
+            LABEL="${label}" \
+            REPEAT="${REPEAT}" \
+            "${SCRIPT_DIR}/benchmark.sh"
 
-        if [[ ! -f "${csv}" ]]; then
-          echo "missing expected benchmark csv: ${csv}" >&2
-          exit 1
-        fi
+          if [[ ! -f "${csv}" ]]; then
+            echo "missing expected benchmark csv: ${csv}" >&2
+            exit 1
+          fi
 
-        if [[ ! -f "${AGGREGATE_CSV}" ]]; then
-          cp "${csv}" "${AGGREGATE_CSV}"
-        else
-          tail -n +2 "${csv}" >> "${AGGREGATE_CSV}"
-        fi
+          if [[ ! -f "${AGGREGATE_CSV}" ]]; then
+            cp "${csv}" "${AGGREGATE_CSV}"
+          else
+            tail -n +2 "${csv}" >> "${AGGREGATE_CSV}"
+          fi
+        done
       done
     done
   done

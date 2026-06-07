@@ -1051,3 +1051,23 @@
 - `COMPILER2026_DAG_PIN_WORKERS=1 LABEL=pin_workers_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/pin_workers_repeat3.csv`；summary 为 `contestant_total=1.775266s speedup_geo=1.646x`。
 - `COMPILER2026_DAG_PIN_WORKERS=1 COMPILER2026_DAG_PROFILE=1 LABEL=pin_workers_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/pin_workers_profile_smoke.csv`。
 - `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。
+
+## 2026-06-08 tune wrapper pinning dimension
+
+改动：
+
+- `tune_params.sh` 新增 `COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST`。
+- 默认值继承当前 `COMPILER2026_DAG_PIN_WORKERS`，未设置时为单值 `0`，因此日常 sweep 规模不增加。
+- 显式设置 `COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST=0,1` 时，wrapper 会分别调用 `benchmark.sh` 并把 `COMPILER2026_DAG_PIN_WORKERS` 透传给 contestant。
+- label 中加入 `pin<0|1>`，aggregate summary 继续按 `dag_pin_workers` 分组。
+
+经验：
+
+- worker pinning 是环境相关参数，应该纳入目标机事前离线搜索，而不是要求手工跑两套 benchmark 后再拼 CSV。
+- 新维度默认单值，避免和 async 阈值、batch、live-window 组合后无意放大日常 sweep 成本。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST=0,1 COMPILER2026_TUNE_TASK_BATCH_LIST=auto REPEAT=1 ./submission/scripts/tune_params.sh`，展开 pin0/pin1 两个组合。

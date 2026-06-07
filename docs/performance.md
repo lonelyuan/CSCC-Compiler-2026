@@ -73,7 +73,7 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 
 `benchmark.sh` 还支持用 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 在一次运行里扫描多个线程数。CSV 的 `threads` 字段区分每条记录，suite 输出目录按 `threads_<count>` 拆分，terminal summary 按线程分组输出 IR 计数、整体 speedup、speedup P50/P95、async decision 和 profile 摘要，避免不同线程数的结果被混合平均。未设置该变量时仍沿用单个 `COMPILER2026_DAG_THREADS`，默认值为 `4`。成功运行后，脚本默认删除 `${LABEL}` 下的大体量 per-suite 输入/输出/profile 目录，保留 `${LABEL}.csv`、`bin/` 和 `ir/`；需要排查单次输出时设置 `COMPILER2026_BENCH_KEEP_ARTIFACTS=1`。
 
-离线参数调优使用 `submission/scripts/tune_params.sh`，不要放进 contestant 计时路径。该包装脚本默认遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48` 和 `COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8`，并支持显式设置 `COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST` 与 `COMPILER2026_TUNE_DAG_MAX_LIVE_LIST`；后两者默认使用当前单值，避免日常 sweep 组合数膨胀。每个组合调用一次 `benchmark.sh`，再让 `benchmark.sh` 扫 `COMPILER2026_TUNE_THREAD_LIST` 指定的线程列表。所有组合的原始行会追加到 `build/optimization_benchmarks/<label>_aggregate.csv`，terminal 会按 `threads + async_min_b + async_min_blocks + dag_max_live + task_batch` 输出 `tune_summary`。
+离线参数调优使用 `submission/scripts/tune_params.sh`，不要放进 contestant 计时路径。该包装脚本默认遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48` 和 `COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8`，并支持显式设置 `COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST`、`COMPILER2026_TUNE_DAG_MAX_LIVE_LIST` 与 `COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST`；后几者默认使用当前单值，避免日常 sweep 组合数膨胀。每个组合调用一次 `benchmark.sh`，再让 `benchmark.sh` 扫 `COMPILER2026_TUNE_THREAD_LIST` 指定的线程列表。所有组合的原始行会追加到 `build/optimization_benchmarks/<label>_aggregate.csv`，terminal 会按 `threads + async_min_b + async_min_blocks + dag_max_live + dag_pin_workers + task_batch` 输出 `tune_summary`。
 
 真实目标机上建议先用 `REPEAT=1` 扫宽参数空间，筛掉明显退化的组合；对 panel-local 默认路径应要求 `dag_missing_deps=0`，对跨 panel 实验路径则要同时查看 `dag_first_touch_deps`，避免把合法的原始输入块 first-touch 误判为异常缺失 producer。候选组合再用 `REPEAT=3` 或更高重复次数复测。当前默认 `b >= 18` / auto batch 8 只代表本 VM 上已归档的稳妥默认，不代表不同 CPU 架构、核心数、cache/内存带宽或 NUMA 拓扑下的最终最优点。
 
@@ -87,6 +87,7 @@ COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48 \
 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 \
 COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8 \
 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 \
+COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST=0,1 \
 COMPILER2026_TUNE_LABEL_PREFIX=target_param_sweep \
 REPEAT=1 ./submission/scripts/tune_params.sh
 ```

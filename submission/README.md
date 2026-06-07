@@ -88,17 +88,19 @@ COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48 \
 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 \
 COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8 \
 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 \
+COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST=0,1 \
 COMPILER2026_TUNE_LABEL_PREFIX=target_param_sweep \
 REPEAT=1 ./submission/scripts/tune_params.sh
 ```
 
 The tuning wrapper calls `benchmark.sh` for each threshold/min-block/batch/live
-window combination, lets `benchmark.sh` sweep the requested thread list, and
-appends all rows to `build/optimization_benchmarks/<label>_aggregate.csv`. It
-is intended for pre-submission profiling on the real target machine, not for
-timed contestant execution. It inherits the default artifact cleanup from
-`benchmark.sh`, so the aggregate and per-combination CSV files remain while
-bulky suite directories are removed after successful combinations.
+window/pinning combination, lets `benchmark.sh` sweep the requested thread
+list, and appends all rows to
+`build/optimization_benchmarks/<label>_aggregate.csv`. It is intended for
+pre-submission profiling on the real target machine, not for timed contestant
+execution. It inherits the default artifact cleanup from `benchmark.sh`, so the
+aggregate and per-combination CSV files remain while bulky suite directories
+are removed after successful combinations.
 
 An experimental cross-panel DAG path is available for development builds:
 
