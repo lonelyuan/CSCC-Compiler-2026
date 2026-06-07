@@ -90,7 +90,7 @@ Current implementation:
 
 - The pass analyzes the official `contest::block_cholesky` IR with LoopInfo.
 - It keeps the original function body as the small-block serial path.
-- It clones an async implementation for `b >= 32`, keeps `cholesky`
+- It clones an async implementation for `b >= 24`, keeps `cholesky`
   synchronous, outlines async-path `trsm` and `madd`
   calls into generated IR task functions, recovers block coordinates from
   direct or nested one-dimensional GEP offsets, converts them to the runtime's

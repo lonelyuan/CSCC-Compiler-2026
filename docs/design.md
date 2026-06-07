@@ -49,7 +49,7 @@ else
     run original serial IR path;
 ```
 
-默认 predicate 仍使用 `b >= 32`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
+默认 predicate 仍使用 `b >= 24`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
 
 async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
@@ -182,7 +182,7 @@ Pass 和 runtime 当前共同保证：
 
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
 - block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；Pass 会先用 `n` / `b` 从 element offset 恢复 block row/col，再组合成 runtime 现有的一维 key。如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
-- 当前默认异步阈值 `b >= 32` 和最小 block 数 2 是公开 benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，已回退。
+- 当前默认异步阈值 `b >= 24` 和最小 block 数 2 是公开 benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，仍不作为默认。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 
