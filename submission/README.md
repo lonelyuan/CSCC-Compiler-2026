@@ -68,7 +68,10 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 
 For thread sweeps, benchmark output directories are split by
 `threads_<count>` and the terminal summary groups suite/profile statistics by
-the `threads` CSV column.
+the `threads` CSV column. After a successful run, `benchmark.sh` removes the
+large per-suite input/output/profile directories by default and keeps the CSV,
+IR, and binaries. Set `COMPILER2026_BENCH_KEEP_ARTIFACTS=1` when you need the
+per-run files for debugging.
 
 Run an offline parameter sweep for target-platform tuning:
 
@@ -86,7 +89,9 @@ The tuning wrapper calls `benchmark.sh` for each threshold/batch pair, lets
 `benchmark.sh` sweep the requested thread list, and appends all rows to
 `build/optimization_benchmarks/<label>_aggregate.csv`. It is intended for
 pre-submission profiling on the real target machine, not for timed contestant
-execution.
+execution. It inherits the default artifact cleanup from `benchmark.sh`, so the
+aggregate and per-combination CSV files remain while bulky suite directories are
+removed after successful combinations.
 
 An experimental cross-panel DAG path is available for development builds:
 

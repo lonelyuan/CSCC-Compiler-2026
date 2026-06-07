@@ -28,6 +28,7 @@ PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
 TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
 ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-18}"
 ASYNC_MIN_BLOCKS="${COMPILER2026_ASYNC_MIN_BLOCKS:-2}"
+KEEP_ARTIFACTS="${COMPILER2026_BENCH_KEEP_ARTIFACTS:-0}"
 REPEAT="${REPEAT:-3}"
 LABEL="${LABEL:-run}"
 
@@ -339,6 +340,7 @@ writer.writerow([
     f"{tasks['madd']['exec_ms']:.3f}",
 ])
 PY
+
   done
 }
 
@@ -444,3 +446,10 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
                 f"max_wait_dag_live={max(int(r['max_wait_dag_live']) for r in task_rows)}"
             )
 PY
+
+if [[ "${KEEP_ARTIFACTS}" == "0" ]]; then
+  rm -rf "${BENCH_DIR:?}/${LABEL}"
+  echo "cleaned_artifacts=${BENCH_DIR}/${LABEL}"
+else
+  echo "kept_artifacts=${BENCH_DIR}/${LABEL}"
+fi

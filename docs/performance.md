@@ -68,7 +68,7 @@ COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER
 
 `smoke_test.sh` 和 `benchmark.sh` 都会透传 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`。因此小范围 verifier smoke 可以直接验证 async 阈值、线程数、profile 和 batch 覆盖是否真实生效。
 
-`benchmark.sh` 还支持用 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 在一次运行里扫描多个线程数。CSV 的 `threads` 字段区分每条记录，suite 输出目录按 `threads_<count>` 拆分，terminal summary 按线程分组输出 IR 计数、整体 speedup、async decision 和 profile 摘要，避免不同线程数的结果被混合平均。未设置该变量时仍沿用单个 `COMPILER2026_DAG_THREADS`，默认值为 `4`。
+`benchmark.sh` 还支持用 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 在一次运行里扫描多个线程数。CSV 的 `threads` 字段区分每条记录，suite 输出目录按 `threads_<count>` 拆分，terminal summary 按线程分组输出 IR 计数、整体 speedup、async decision 和 profile 摘要，避免不同线程数的结果被混合平均。未设置该变量时仍沿用单个 `COMPILER2026_DAG_THREADS`，默认值为 `4`。成功运行后，脚本默认删除 `${LABEL}` 下的大体量 per-suite 输入/输出/profile 目录，保留 `${LABEL}.csv`、`bin/` 和 `ir/`；需要排查单次输出时设置 `COMPILER2026_BENCH_KEEP_ARTIFACTS=1`。
 
 离线参数调优使用 `submission/scripts/tune_params.sh`，不要放进 contestant 计时路径。该包装脚本默认遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48` 和 `COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8`，每个组合调用一次 `benchmark.sh`，再让 `benchmark.sh` 扫 `COMPILER2026_TUNE_THREAD_LIST` 指定的线程列表。所有组合的原始行会追加到 `build/optimization_benchmarks/<label>_aggregate.csv`，terminal 会按 `threads + async_min_b + task_batch` 输出 `tune_summary`。
 
@@ -172,11 +172,13 @@ docs/benchmark_results/cross_panel_gate_default_repeat3.csv
 docs/benchmark_results/cross_panel_opt_in_profile_smoke.csv
 docs/benchmark_results/successor_edge_pool_repeat3.csv
 docs/benchmark_results/successor_edge_pool_profile_smoke.csv
+docs/benchmark_results/benchmark_artifact_cleanup_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
 `profile_csv_smoke.csv`、`ready_queue_profile_csv_smoke.csv`、`dag_profile_counters_smoke.csv`、`panel_dag_cleanup_profile_smoke.csv`、`async_predicate_profile_smoke.csv`、`async_predicate_disabled_smoke.csv`、`async_predicate_threads1_smoke.csv`、`async_decision_profile_smoke.csv`、`async_decision_threads1_smoke.csv`、`benchmark_overall_summary_smoke.csv`、`dag_successor_fanout_smoke.csv`、`gep_operator_key_smoke.csv`、`ir_submit_counts_smoke.csv`、`dag_reserve_structures_smoke.csv`、`panel_task_reserve_smoke.csv`、`queue_reset_lock_smoke.csv`、`main_wait_profile_smoke.csv`、`dag_live_profile_smoke.csv`、`dag_dep_state_smoke.csv`、`ready_width_profile_smoke.csv`、`adaptive_batch_profile_smoke.csv`、`wait_span_profile_smoke.csv`、`ir_wait_count_profile_smoke.csv`、`dag_release_batch_profile_smoke.csv`、`wait_pressure_profile_smoke.csv`、`recursive_gep_key_smoke.csv`、`smoke_env_passthrough_profile_smoke.csv`、`block_coordinate_key_smoke.csv`、`async_min_blocks_profile_smoke.csv`、`async_min_blocks5_profile_smoke.csv`、`thread_sweep_profile_smoke.csv`、`batch8_default_profile_smoke.csv`、`async_min_b24_default_profile_smoke.csv`、`tune_wrapper_profile_smoke_aggregate.csv`、`async_min_b18_madd_no_output_default_profile_smoke.csv` 和 `successor_edge_pool_profile_smoke.csv` 是 profile 数据链验证用的单次重复实验，用于确认 CSV 字段、聚合逻辑、阈值开关、最小 block 数开关、线程数开关、线程数扫参 summary 分组、离线调参 aggregate 汇总、smoke/benchmark 环境透传、async decision 原因聚合、整体 summary 输出、DAG successor fanout 统计、DAG release batch 统计、wait 入口 pressure 统计、block key 恢复 smoke 行为、block row/col 恢复到 runtime key 的路径、递归一维 GEP key 恢复路径、IR call site 计数、静态 wait call site 计数、DAG reserve 行为、panel task reserve 估算、runtime reset 加锁后的 profile 链路、main wait 空等统计、DAG live-pressure 统计、依赖解析状态统计、ready queue 宽度采样统计、自适应 runtime batch 记录和 wait span 统计，不作为正式性能均值。`tune_wrapper_smoke_aggregate.csv` 是调参 wrapper 的单组合非 profile smoke；`ready_queue_batch8_repeat3.csv` 是早期 task batch 调参对照；`batch8_default_repeat3.csv` 是默认 batch 调整后的正式重复结果；`async_min_b24_default_repeat3.csv` 是上一版默认阈值调整后的正式重复结果；`async_min_b18_madd_no_output_default_repeat3.csv` 是上一版默认阈值和 panel-local output key 优化后的正式重复结果；`successor_edge_pool_repeat3.csv` 是当前 runtime successor edge pool 优化后的正式重复结果。
 `cross_panel_opt_in_profile_smoke.csv` 是跨 panel DAG 实验路径的 profile 记录，显示该路径把 panel 内静态 wait 降为外层 DAG 收尾 wait：`ir_wait_calls=1`、`ir_submit_deps=3`，但 4 vCPU VM 上 `speedup_geo=1.499x`、`max_dag_live=6072`、`dag_missing_deps=7595`，低于默认 panel-local 方案。`cross_panel_gate_default_repeat3.csv` 验证新增 gate 后默认路径仍保持 panel-local：`ir_wait_calls=1`、`speedup_geo=1.633x`。
+`benchmark_artifact_cleanup_smoke.csv` 是 benchmark artifact cleanup 的单次 smoke 记录，用于证明 CSV 保留和默认清理路径可用，不作为正式性能均值。
 
 ## 结论
 

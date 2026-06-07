@@ -20,7 +20,7 @@
 
 结论不要只看单点 speedup，应使用几何平均和分层统计，避免对公开样例或 4 核 VM 过拟合。
 
-当前 `benchmark.sh` 已支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 这类多线程扫参入口，并按线程分组输出 summary；`tune_params.sh` 在其外层补充 `async_min_b × task_batch` 离线扫参，并汇总 aggregate CSV。真实鲲鹏平台上可直接把线程列表扩展到 `1,2,4,8,16,32,48,64`，再结合 profile CSV 的 ready width、wait pressure 和 queue/exec 时间判断默认阈值是否需要重设。
+当前 `benchmark.sh` 已支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 这类多线程扫参入口，并按线程分组输出 summary；成功运行后默认清理 per-suite 临时大文件，避免长时间 sweep 撑满 VM 磁盘。`tune_params.sh` 在其外层补充 `async_min_b × task_batch` 离线扫参，并汇总 aggregate CSV。真实鲲鹏平台上可直接把线程列表扩展到 `1,2,4,8,16,32,48,64`，再结合 profile CSV 的 ready width、wait pressure 和 queue/exec 时间判断默认阈值是否需要重设。
 
 ## Pass 演进方向
 

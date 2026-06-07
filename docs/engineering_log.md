@@ -862,3 +862,25 @@
 - `LABEL=dense_producer_table_repeat3_b REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，summary 为 `contestant_total=1.798338s speedup_geo=1.623x`。
 - `LABEL=producer_reserve_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 清理空间后通过，summary 为 `contestant_total=1.798080s speedup_geo=1.658x`，改动已回退。
 - `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 包含 `docs/technical_scheme_notes.md`，并在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过。
+
+## 2026-06-08 benchmark artifact cleanup
+
+改动：
+
+- `submission/scripts/benchmark.sh` 新增 `COMPILER2026_BENCH_KEEP_ARTIFACTS`。
+- 默认值为 `0`：成功生成 CSV 和 summary 后，删除 `${BENCH_DIR}/${LABEL}` 下的 per-suite input/output/profile/verifier 工作目录，保留 `${BENCH_DIR}/${LABEL}.csv`、`bin/` 和 `ir/`。
+- 设置 `COMPILER2026_BENCH_KEEP_ARTIFACTS=1` 时保留 per-run artifacts，用于调试 verifier 失败或 profile stderr。
+- 失败路径不做清理；脚本中途退出时仍保留现场，便于定位错误。
+
+经验：
+
+- 真实 sweep 不是只看单次 benchmark；大量 label 会快速积累输入矩阵和输出矩阵。本轮 VM 上 `build/optimization_benchmarks` 曾占用 `54G`，导致 baseline 写结果失败。默认清理临时 suite 目录能让长期调参更可靠。
+- CSV 已经包含 timing、IR 计数、async decision 和 runtime profile 聚合；成功路径默认保留 CSV 足以支撑性能结论。需要逐 case 复查时再显式打开 `COMPILER2026_BENCH_KEEP_ARTIFACTS=1`。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `LABEL=benchmark_artifact_cleanup_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/benchmark_artifact_cleanup_smoke.csv`；脚本输出 `cleaned_artifacts=/root/bisheng/build/optimization_benchmarks/benchmark_artifact_cleanup_smoke`，且命令验证 CSV 存在、同名 artifact 目录不存在。
+- `LABEL=benchmark_artifact_keep_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_BENCH_KEEP_ARTIFACTS=1 ./submission/scripts/benchmark.sh` 在 VM 通过，脚本输出 `kept_artifacts=...`，命令验证同名 artifact 目录存在，目录大小约 `633M`；验证后手动删除该临时目录。
+- `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过。
