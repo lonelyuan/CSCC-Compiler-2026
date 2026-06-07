@@ -197,6 +197,7 @@ docs/benchmark_results/cross_panel_sync_cholesky_reserve_profile_smoke.csv
 docs/benchmark_results/pin_workers_schema_default_repeat3.csv
 docs/benchmark_results/pin_workers_repeat3.csv
 docs/benchmark_results/pin_workers_profile_smoke.csv
+docs/benchmark_results/cross_panel_fanout_priority_profile_smoke.csv
 ```
 
 前三个 CSV 来自早期“整函数替换为 runtime 入口”的实验版本。它们的性能更高，但该路线不够符合赛题对 IR 层算子依赖分析的要求，因此不作为当前提交方案。
@@ -208,6 +209,7 @@ docs/benchmark_results/pin_workers_profile_smoke.csv
 `dag_first_touch_cross_panel_profile_smoke.csv` 证明跨 panel 路径中 `dag_missing_deps=7595` 全部对应 `dag_first_touch_deps=7595`，即原始输入块 first-touch，而不是同一 DAG 内已知 output producer 丢失。
 `cross_panel_sync_cholesky_profile_final_smoke.csv` 验证 sync-cholesky cross-panel 实验路径可用：默认 IR guard 中 `wait_key_refs=0`，实验 IR 中 `wait_key=1`、`cholesky_task_refs=0`、`submit_deps3=1`；profile 中 `max_dag_live=1066`，低于 live-window taskized cross-panel 的约 `2050`，但 `speedup_geo=1.534x`、`contestant_total=0.660494s`，仍低于默认 panel-local 正式结果，因此不切默认。
 `cross_panel_reserve_profile_smoke.csv` 和 `cross_panel_sync_cholesky_reserve_profile_smoke.csv` 记录了一次已回退的 cross-panel aware reserve sizing 实验：taskized cross-panel 为 `speedup_geo=1.503x`、`contestant_total=0.663732s`，sync-cholesky 为 `speedup_geo=1.532x`、`contestant_total=0.662763s`，均未超过对应旧实验记录，因此没有保留代码改动。
+`cross_panel_fanout_priority_profile_smoke.csv` 记录了一次已回退的 ready dequeue fanout-priority 实验：该策略只按 runtime 通用 successor fanout 在小窗口内重排 ready task，不读取算子名称；在 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048` 下得到 `speedup_geo=1.452x`、`contestant_total=0.695125s`，低于既有 cross-panel live-window 结果，因此没有保留代码改动。
 
 ## 结论
 

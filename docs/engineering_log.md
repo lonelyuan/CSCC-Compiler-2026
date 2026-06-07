@@ -1071,3 +1071,23 @@
 - `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
 - `git diff --check` 通过。
 - 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18 COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST=2 COMPILER2026_TUNE_DAG_MAX_LIVE_LIST=0 COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST=0,1 COMPILER2026_TUNE_TASK_BATCH_LIST=auto REPEAT=1 ./submission/scripts/tune_params.sh`，展开 pin0/pin1 两个组合。
+
+## 2026-06-08 rejected fanout-priority ready dequeue
+
+尝试：
+
+- 在 runtime 中加入默认关闭的 ready dequeue fanout priority：取 ready task 时扫描小窗口，优先执行 successor fanout 更高的 DAG node。
+- 该策略只使用 runtime 已有的通用 successor 计数，不读取 task 名称，也不把 `trsm/madd/cholesky` 语义写入 runtime。
+- `smoke_test.sh`、`benchmark.sh` 和 `tune_params.sh` 临时透传并记录该开关，用于验证是否值得保留为跨 panel 调度实验维度。
+
+结果：
+
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.601x`。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_FANOUT_PRIORITY=1 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，但 speedup 降到 `1.435x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_FANOUT_PRIORITY=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.409x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_FANOUT_PRIORITY=1 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_fanout_priority_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_fanout_priority_profile_smoke.csv`；summary 为 `contestant_total=0.695125s speedup_geo=1.452x max_dag_live=2049`。
+
+结论：
+
+- fanout priority 同时伤害默认 panel-local smoke 和 cross-panel live-window profile smoke，没有达到保留 opt-in 代码的门槛。
+- 代码和脚本改动已回退，只保留 CSV 和日志。后续若继续做关键路径优先，应由 Pass 提供更精确的 critical-path rank 或改成 per-worker queue/work stealing，而不是只按局部 successor fanout 排序。
