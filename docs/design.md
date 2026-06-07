@@ -159,6 +159,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
 - `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出 async path 判定次数和原因、任务数、队列等待时间、执行时间、worker idle 时间、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程在 `wait()` 中无 ready task 可执行的等待时间、批量出队信息、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/fanout/live 统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
 - smoke 和 benchmark 脚本都会把 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 透传给 contestant。benchmark 还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数；CSV 仍用 `threads` 字段区分记录，输出目录按 `threads_<count>` 拆分，terminal summary 也按线程分组。benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV，包括 auto 模式下实际生效的 runtime batch 摘要。
+- `submission/scripts/tune_params.sh` 是 benchmark 的离线调参包装：它遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST` 和 `COMPILER2026_TUNE_TASK_BATCH_LIST`，每个组合再交给 `benchmark.sh` 扫 `COMPILER2026_TUNE_THREAD_LIST`，最后汇总为一个 aggregate CSV。该脚本用于真实目标机事前 profile-guided 选择默认阈值，不参与 contestant 计时路径。
 
 Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；ready-queue DAG 只看整数 block key 的 producer/consumer 关系。实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。
 
@@ -182,8 +183,8 @@ Pass 和 runtime 当前共同保证：
 
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
 - block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；Pass 会先用 `n` / `b` 从 element offset 恢复 block row/col，再组合成 runtime 现有的一维 key。如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
-- 当前默认异步阈值 `b >= 24` 和最小 block 数 2 是公开 benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，仍不作为默认。
-- 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
+- 当前默认异步阈值 `b >= 24` 和最小 block 数 2 是公开 4 vCPU VM benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，仍不作为默认。
+- 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，离线 sweep wrapper 已能生成跨阈值、batch 和线程数的 aggregate CSV，但 runtime 尚未把历史 profile 自动反馈成下一次默认策略。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 
 ## 本地验证

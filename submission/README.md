@@ -70,6 +70,24 @@ For thread sweeps, benchmark output directories are split by
 `threads_<count>` and the terminal summary groups suite/profile statistics by
 the `threads` CSV column.
 
+Run an offline parameter sweep for target-platform tuning:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_TUNE_THREAD_LIST=1,2,4,8 \
+COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24,32,48 \
+COMPILER2026_TUNE_TASK_BATCH_LIST=auto,4,8 \
+COMPILER2026_TUNE_LABEL_PREFIX=target_param_sweep \
+REPEAT=1 ./submission/scripts/tune_params.sh
+```
+
+The tuning wrapper calls `benchmark.sh` for each threshold/batch pair, lets
+`benchmark.sh` sweep the requested thread list, and appends all rows to
+`build/optimization_benchmarks/<label>_aggregate.csv`. It is intended for
+pre-submission profiling on the real target machine, not for timed contestant
+execution.
+
 Package artifacts:
 
 ```bash
@@ -100,6 +118,9 @@ Current implementation:
   allocation, adaptive task submit/dequeue batching, an opt-in profiling mode,
   and a panel-local ready queue for `trsm` to `madd` dependencies. Official
   `trsm` and `madd` ABI calls remain in Pass-generated IR task functions.
+- `scripts/tune_params.sh` provides an offline wrapper around `benchmark.sh` for
+  environment-specific threshold/batch/thread sweeps. Runtime defaults remain
+  deterministic and cheap during contestant execution.
 - No source annotations are required.
 
 Documentation:

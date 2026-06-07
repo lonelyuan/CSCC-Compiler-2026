@@ -462,6 +462,7 @@ writes block(row, col)
 - NUMA-aware task placement。
 - worker pinning。
 - 把当前 profile 指标接入 benchmark CSV，并用于自动选择阈值和 task batch。
+- 用离线扫参脚本在真实目标机上选择默认参数，避免把当前 4 vCPU VM 的局部最优固化成跨平台常量。
 
 ### 7.5 面向真实平台的实验方法
 
@@ -475,6 +476,13 @@ writes block(row, col)
 只有当一个优化在多组规模和多种线程数下都稳定提升，才应认为它是鲁棒优化。
 
 当前脚本层已经提供线程数扫参入口；真实鲲鹏机器上应把同一标签下的多线程 CSV 作为 profile-guided heuristic 的输入，而不是把本地 4 vCPU VM 的最优点固化进 runtime。
+
+本项目现在采用两阶段调参策略：
+
+- 事前离线调参：`submission/scripts/tune_params.sh` 遍历 async 阈值、task batch 和线程数，复用 `benchmark.sh` 的 verifier、IR 计数和 profile CSV，生成 aggregate CSV，作为真实平台默认参数的依据。
+- 运行时廉价选择：contestant 执行路径只根据 `n, b, block_count, thread_count` 和显式环境变量做 deterministic 决策，不在被计时路径中试跑多个参数。
+
+这样可以利用 profile 基础设施，又避免自动调优本身吞掉计时预算或对单次 judge 输入过拟合。
 
 ## 8. 可以调研的方向
 

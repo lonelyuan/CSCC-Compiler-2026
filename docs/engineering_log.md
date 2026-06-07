@@ -736,3 +736,28 @@
 - `LABEL=async_min_b24_default_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/async_min_b24_default_profile_smoke.csv`；async decision 为 `enabled=22 disabled=17 small_b=17 small_blocks=0 threads_disabled=0 single_block=0`，profile summary 包含 `runtime_batch_max=8`、`dag_missing_deps=0`。
 - `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在默认阈值下 verifier 通过，speedup `1.513x`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-08 offline parameter sweep wrapper
+
+改动：
+
+- 新增 `submission/scripts/tune_params.sh`，在 `benchmark.sh` 外层遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST` 和 `COMPILER2026_TUNE_TASK_BATCH_LIST`，每个组合再用 `COMPILER2026_TUNE_THREAD_LIST` 交给 benchmark 做线程扫参。
+- 每个组合保留独立 benchmark CSV，并把所有原始行追加到 `build/optimization_benchmarks/<label>_aggregate.csv`；脚本结尾按 `threads + async_min_b + task_batch` 输出 `tune_summary`。
+- 增加 `COMPILER2026_TUNE_DRY_RUN=1`，用于快速检查参数展开和 label 生成，不触发 build/benchmark。
+- 同步更新 README、设计、性能、路线图和优化原理文档，把调参策略明确为“事前离线搜索，运行时廉价 deterministic 决策”。
+
+经验：
+
+- `COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_TASK_BATCH` 和线程数都依赖 CPU 核心数、cache、内存带宽、NUMA 和调度开销；当前 4 vCPU VM 的默认值不能直接视为真实鲲鹏机器最优。
+- profile 基础设施已经足够支撑离线 sweep，暂时不需要继续增加计数字段；更重要的是把已有字段按参数组合沉淀为可比较的 aggregate CSV。
+- 不把在线计时搜索放进 contestant 执行路径，避免调优开销污染最终计时，也避免对单次 judge 输入做不可控自适应。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- 本地 dry-run 通过：`COMPILER2026_TUNE_DRY_RUN=1 COMPILER2026_TUNE_THREAD_LIST=1,4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=18,24 COMPILER2026_TUNE_TASK_BATCH_LIST=auto,8 COMPILER2026_TUNE_LABEL_PREFIX='dry run' REPEAT=1 ./submission/scripts/tune_params.sh` 展开 4 个组合，不触发 build/benchmark。
+- `./scripts/sync_to_vm.sh` 通过。
+- VM 单组合非 profile wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=1 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=24 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_wrapper_smoke REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_wrapper_smoke_aggregate.csv`；summary 为 `threads=1 async_min_b=24 task_batch=auto runs=4 serial_total=0.978023s contestant_total=0.963611s speedup_geo=1.009x dag_missing_deps=0`。
+- VM 单组合 profile wrapper smoke 通过：`COMPILER2026_TUNE_THREAD_LIST=4 COMPILER2026_TUNE_ASYNC_MIN_B_LIST=24 COMPILER2026_TUNE_TASK_BATCH_LIST=auto COMPILER2026_TUNE_LABEL_PREFIX=tune_wrapper_profile_smoke COMPILER2026_TUNE_PROFILE=1 REPEAT=1 ./submission/scripts/tune_params.sh`，归档为 `docs/benchmark_results/tune_wrapper_profile_smoke_aggregate.csv`；summary 为 `threads=4 async_min_b=24 task_batch=auto runs=4 serial_total=0.979418s contestant_total=0.630574s speedup_geo=1.545x dag_missing_deps=0`，profile summary 包含 `enabled=22 disabled=17 small_b=17`、`runtime_batch_max=8`。
+- `./submission/scripts/package.sh` 在 VM 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
