@@ -312,9 +312,10 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 active_tasks_ -= batch_count;
-                const bool released = completeDagTasksLocked(batch.data(), batch_count);
+                const std::size_t released = completeDagTasksLocked(batch.data(), batch_count);
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
-                if (released) {
+                recordDagReleaseBatchLocked(released);
+                if (released > 0) {
                     work_cv_.notify_all();
                 }
                 if (tasks_.empty() && active_tasks_ == 0) {
@@ -356,9 +357,10 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 active_tasks_ -= batch_count;
-                const bool released = completeDagTasksLocked(batch.data(), batch_count);
+                const std::size_t released = completeDagTasksLocked(batch.data(), batch_count);
                 recordBatchProfileLocked(batch.data(), batch_count, profile, true);
-                if (released) {
+                recordDagReleaseBatchLocked(released);
+                if (released > 0) {
                     work_cv_.notify_all();
                 }
                 if (tasks_.empty() && active_tasks_ == 0) {
@@ -410,8 +412,8 @@ private:
         recordReadyWidthLocked(tasks_.size() - task_head_);
     }
 
-    bool completeDagTasksLocked(const Task *batch, std::size_t count) {
-        bool released = false;
+    std::size_t completeDagTasksLocked(const Task *batch, std::size_t count) {
+        std::size_t released = 0;
         for (std::size_t i = 0; i < count; ++i) {
             const int node_index = batch[i].dag_node;
             if (node_index < 0) {
@@ -435,7 +437,7 @@ private:
                     if (profile_enabled_.load(std::memory_order_relaxed)) {
                         ++profile_dag_released_;
                     }
-                    released = true;
+                    ++released;
                 }
             }
         }
@@ -494,6 +496,14 @@ private:
         max_ready_tasks_ = std::max(max_ready_tasks_, ready);
         ++ready_width_samples_;
         ready_width_sum_ += ready;
+    }
+
+    void recordDagReleaseBatchLocked(std::size_t released) {
+        if (!profile_enabled_.load(std::memory_order_relaxed) || released == 0) {
+            return;
+        }
+        ++dag_release_batches_;
+        max_dag_release_batch_ = std::max(max_dag_release_batch_, released);
     }
 
     void recordWaitProfile(bool profiling, std::uint64_t wait_enter_ns) {
@@ -566,11 +576,13 @@ private:
         profile_dag_missing_deps_ = 0;
         profile_dag_initial_ready_ = 0;
         profile_dag_released_ = 0;
+        dag_release_batches_ = 0;
         ready_width_samples_ = 0;
         ready_width_sum_ = 0;
         max_dag_pending_ = 0;
         max_dag_successors_ = 0;
         max_dag_live_ = 0;
+        max_dag_release_batch_ = 0;
         max_dequeue_batch_ = 0;
         max_ready_tasks_ = 0;
         task_profile_count_ = 0;
@@ -590,7 +602,8 @@ private:
                      "ready_samples=%llu ready_sum=%llu "
                      "dag_nodes=%llu dag_edges=%llu dag_satisfied_deps=%llu "
                      "dag_missing_deps=%llu dag_initial_ready=%llu "
-                     "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
+                     "dag_released=%llu dag_release_batches=%llu "
+                     "max_dag_release_batch=%zu max_dag_pending=%zu max_dag_successors=%zu "
                      "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
                      "main_wait_ms=%.3f wait_calls=%llu wait_ms=%.3f\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
@@ -608,7 +621,9 @@ private:
                      static_cast<unsigned long long>(profile_dag_missing_deps_),
                      static_cast<unsigned long long>(profile_dag_initial_ready_),
                      static_cast<unsigned long long>(profile_dag_released_),
-                     max_dag_pending_, max_dag_successors_, max_dag_live_,
+                     static_cast<unsigned long long>(dag_release_batches_),
+                     max_dag_release_batch_, max_dag_pending_, max_dag_successors_,
+                     max_dag_live_,
                      static_cast<double>(total_queue_ns_) / 1000000.0,
                      static_cast<double>(total_exec_ns_) / 1000000.0,
                      static_cast<double>(worker_idle_ns_) / 1000000.0,
@@ -668,10 +683,12 @@ private:
     std::uint64_t profile_dag_missing_deps_ = 0;
     std::uint64_t profile_dag_initial_ready_ = 0;
     std::uint64_t profile_dag_released_ = 0;
+    std::uint64_t dag_release_batches_ = 0;
     std::uint64_t ready_width_samples_ = 0;
     std::uint64_t ready_width_sum_ = 0;
     std::size_t max_dequeue_batch_ = 0;
     std::size_t max_ready_tasks_ = 0;
+    std::size_t max_dag_release_batch_ = 0;
     std::size_t max_dag_pending_ = 0;
     std::size_t max_dag_successors_ = 0;
     std::size_t max_dag_live_ = 0;

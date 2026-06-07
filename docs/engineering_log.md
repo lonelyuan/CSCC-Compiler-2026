@@ -507,3 +507,27 @@
 - `LABEL=ir_wait_count_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/ir_wait_count_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.954983s contestant_total=0.644285s speedup_avg=1.510x speedup_geo=1.486x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.403`、`ready_per_thread_avg=20.101`、`dag_edges_avg=4652.2`、`dag_satisfied_deps_avg=7307.8`、`dag_missing_deps=0`、`max_dag_live=504`、`main_wait_ms_avg=2.707`、`wait_ms_avg=45.206`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 DAG release batch profile
+
+改动：
+
+- `completeDagTasksLocked` 改为返回本次完成批量释放出的 ready successor 数，调度语义仍保持 release 后 `notify_all`。
+- runtime profile 新增 `dag_release_batches` 和 `max_dag_release_batch`，分别记录释放过 successor 的完成批次数，以及单次完成批量释放 successor 的峰值。
+- benchmark CSV 和 profile summary 新增这两个字段，归档 `dag_release_batch_profile_smoke.csv`。
+
+经验：
+
+- 先试过把单个 successor release 改为 `notify_one`，但单次 profile benchmark 出现 `speedup_geo=1.451x`、`queue_ms/wait_ms` 偏高；该调度行为未保留。
+- `dag_released` 是释放出的 task 总数，不能说明这些释放是集中发生还是零散发生。`dag_release_batches` 和 `max_dag_release_batch` 能给后续唤醒策略、per-worker queue 和 work stealing 设计提供更直接的证据。
+- 本轮最终只增加 profile 数据并保持原 `notify_all` release 语义，避免在证据不足时改变调度策略。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.823x`。
+- `LABEL=dag_release_batch_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_release_batch_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.972092s contestant_total=0.645926s speedup_avg=1.529x speedup_geo=1.504x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.272`、`ready_per_thread_avg=20.318`、`dag_edges_avg=4642.8`、`dag_satisfied_deps_avg=7317.2`、`dag_missing_deps=0`、`dag_release_batches_avg=305.0`、`max_dag_release_batch=98`、`max_dag_live=511`、`main_wait_ms_avg=1.273`、`wait_ms_avg=45.306`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

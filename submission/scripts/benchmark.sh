@@ -75,7 +75,7 @@ IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_initial_ready,dag_released,dag_release_batches,max_dag_release_batch,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -173,10 +173,12 @@ summary_counts = {
     "dag_missing_deps": 0,
     "dag_initial_ready": 0,
     "dag_released": 0,
+    "dag_release_batches": 0,
 }
 summary_max = {
     "max_batch": 0,
     "max_ready": 0,
+    "max_dag_release_batch": 0,
     "max_dag_pending": 0,
     "max_dag_successors": 0,
     "max_dag_live": 0,
@@ -283,6 +285,8 @@ writer.writerow([
     summary_counts["dag_missing_deps"],
     summary_counts["dag_initial_ready"],
     summary_counts["dag_released"],
+    summary_counts["dag_release_batches"],
+    summary_max["max_dag_release_batch"],
     summary_max["max_dag_pending"],
     summary_max["max_dag_successors"],
     summary_max["max_dag_live"],
@@ -372,6 +376,8 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
             f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
             f"dag_satisfied_deps_avg={statistics.mean(int(r['dag_satisfied_deps']) for r in task_rows):.1f} "
             f"dag_missing_deps={sum(int(r['dag_missing_deps']) for r in task_rows)} "
+            f"dag_release_batches_avg={statistics.mean(int(r['dag_release_batches']) for r in task_rows):.1f} "
+            f"max_dag_release_batch={max(int(r['max_dag_release_batch']) for r in task_rows)} "
             f"max_dag_successors={max(int(r['max_dag_successors']) for r in task_rows)} "
             f"max_dag_live={max(int(r['max_dag_live']) for r in task_rows)} "
             f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
