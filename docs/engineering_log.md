@@ -659,3 +659,28 @@
 - `min_blocks=5` summary 为 `runs=4 serial_total=0.964741s contestant_total=0.761458s speedup_avg=1.222x speedup_geo=1.193x`，`async_decisions: enabled=14 disabled=25 small_b=20 small_blocks=5 threads=0 single_block=0`。
 - 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-08 benchmark thread sweep
+
+改动：
+
+- `benchmark.sh` 新增 `COMPILER2026_DAG_THREAD_LIST`，支持 `1,2,4` 或空格分隔的多线程扫参；未设置时仍使用原来的 `COMPILER2026_DAG_THREADS`，默认值保持 `4`。
+- 多线程扫参时 suite 输出目录拆分为 `threads_<count>/<suite>`，避免不同线程数的 `contestant_*.profile`、time 和 verifier 文件互相覆盖。
+- benchmark terminal summary 改为按 `threads` 分组输出 suite 均值、IR 计数、整体 speedup、async decision 和 profile 摘要，避免把不同线程数的结果混合成一个均值。
+- 同步更新 `README`、设计文档、性能记录、路线图和优化原理说明，把该功能定位为真实多核平台上的 profile-guided 实验入口。
+
+经验：
+
+- 本轮不改变 Pass 或 runtime 调度语义，只补齐路线图中“覆盖多线程维度”的实验基础设施。
+- `threads=1` profile smoke 显示 `enabled=0 disabled=39 ... threads_disabled=19`，证明线程数扫参中单线程组仍由 runtime predicate 禁用 async path，而不是执行任务化开销。
+- `threads=4` 同一 CSV 中仍保留 `submit_deps=2 submit_plain=0 wait_calls=1` 和 DAG profile counters，说明新脚本结构没有破坏 IR/profile 数据链。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `LABEL=thread_sweep_profile_smoke REPEAT=1 COMPILER2026_DAG_THREAD_LIST=1,4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/thread_sweep_profile_smoke.csv`。
+- 本轮 thread sweep summary 中 `threads=1` 为 `runs=4 serial_total=0.971066s contestant_total=0.958938s speedup_avg=1.010x speedup_geo=1.010x`，async decision 为 `enabled=0 disabled=39 small_b=20 small_blocks=0 threads_disabled=19 single_block=0`。
+- `threads=4` 为 `runs=4 serial_total=0.977226s contestant_total=0.685154s speedup_avg=1.453x speedup_geo=1.412x`，async decision 为 `enabled=19 disabled=20 small_b=20 small_blocks=0 threads_disabled=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_per_thread_avg=20.368`、`dag_missing_deps=0`、`wait_dag_live_avg=89.156`、`max_wait_dag_live=496`。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.815x`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

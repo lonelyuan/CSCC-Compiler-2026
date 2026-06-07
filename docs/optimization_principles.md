@@ -308,7 +308,7 @@ void compiler2026_runtime_end();
 - 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/live 等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 
-benchmark 脚本会把这些 profile 行解析进 CSV，并记录 auto 模式下实际生效的 runtime batch。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。
+benchmark 脚本会把这些 profile 行解析进 CSV，并记录 auto 模式下实际生效的 runtime batch。它还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数，并按 `threads` 字段分组输出 summary。这样后续调 `b` 阈值、task batch 或 range task 时，可以同时看到速度、正确性和调度指标，而不是只凭一次运行的 stderr 日志判断。
 
 简化执行流程：
 
@@ -473,6 +473,8 @@ writes block(row, col)
 - 指标：正确率、几何平均加速比、P50/P95 时间、任务数、队列等待时间、worker 空闲率、主线程 wait 空等时间。
 
 只有当一个优化在多组规模和多种线程数下都稳定提升，才应认为它是鲁棒优化。
+
+当前脚本层已经提供线程数扫参入口；真实鲲鹏机器上应把同一标签下的多线程 CSV 作为 profile-guided heuristic 的输入，而不是把本地 4 vCPU VM 的最优点固化进 runtime。
 
 ## 8. 可以调研的方向
 

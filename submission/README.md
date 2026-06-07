@@ -32,6 +32,14 @@ cd /root/bisheng
 LABEL=runtime_ready_queue_trsm_deps REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
+Sweep multiple runtime thread counts in one CSV:
+
+```bash
+source /etc/profile.d/bisheng.sh
+cd /root/bisheng
+COMPILER2026_DAG_THREAD_LIST=1,2,4 LABEL=thread_sweep REPEAT=1 ./submission/scripts/benchmark.sh
+```
+
 Enable runtime profiling for an async case:
 
 ```bash
@@ -54,6 +62,10 @@ source /etc/profile.d/bisheng.sh
 cd /root/bisheng
 COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
+
+For thread sweeps, benchmark output directories are split by
+`threads_<count>` and the terminal summary groups suite/profile statistics by
+the `threads` CSV column.
 
 Package artifacts:
 

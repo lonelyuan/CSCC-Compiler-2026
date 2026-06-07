@@ -12,7 +12,18 @@ CLANG_BIN="${CLANG:-/opt/bisheng/bin/clang++}"
 OPT_BIN="${OPT:-/opt/bisheng/bin/opt}"
 LLVM_LINK_BIN="${LLVM_LINK:-/opt/bisheng/bin/llvm-link}"
 LLVM_DIS_BIN="${LLVM_DIS:-/opt/bisheng/bin/llvm-dis}"
-THREADS="${COMPILER2026_DAG_THREADS:-4}"
+THREAD_LIST_RAW="${COMPILER2026_DAG_THREAD_LIST:-${COMPILER2026_DAG_THREADS:-4}}"
+THREAD_LIST_RAW="${THREAD_LIST_RAW//,/ }"
+read -r -a THREAD_VALUES <<< "${THREAD_LIST_RAW}"
+if [[ "${#THREAD_VALUES[@]}" -eq 0 ]]; then
+  THREAD_VALUES=(4)
+fi
+for thread_value in "${THREAD_VALUES[@]}"; do
+  if [[ ! "${thread_value}" =~ ^[0-9]+$ || "${thread_value}" == "0" ]]; then
+    echo "invalid COMPILER2026_DAG_THREAD_LIST entry: ${thread_value}" >&2
+    exit 2
+  fi
+done
 PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
 TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
 ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-32}"
@@ -82,7 +93,7 @@ run_suite() {
   local suite="$1"
   local start="$2"
   local end="$3"
-  local suite_dir="${BENCH_DIR}/${LABEL}/${suite}"
+  local suite_dir="${BENCH_DIR}/${LABEL}/threads_${THREADS}/${suite}"
   mkdir -p "${suite_dir}"
 
   sed -n "${start},${end}p" cases/preliminary_public_150.txt > "${suite_dir}/cases.spec"
@@ -331,38 +342,51 @@ PY
   done
 }
 
-run_suite "n512_576" 43 56
-run_suite "n768" 71 81
-run_suite "n1024" 91 96
-run_suite "n1152_small_b" 97 104
+for THREADS in "${THREAD_VALUES[@]}"; do
+  run_suite "n512_576" 43 56
+  run_suite "n768" 71 81
+  run_suite "n1024" 91 96
+  run_suite "n1152_small_b" 97 104
+done
 
 python3 - "${CSV}" <<'PY'
 import csv, math, statistics, sys
 path = sys.argv[1]
 rows = list(csv.DictReader(open(path)))
 print(f"csv={path}")
-for suite in sorted({r["suite"] for r in rows}):
-    vals = [float(r["speedup"]) for r in rows if r["suite"] == suite]
-    serial = [float(r["serial_seconds"]) for r in rows if r["suite"] == suite]
-    contestant = [float(r["contestant_seconds"]) for r in rows if r["suite"] == suite]
-    print(
-        f"{suite}: serial_avg={statistics.mean(serial):.6f}s "
-        f"contestant_avg={statistics.mean(contestant):.6f}s "
-        f"speedup_avg={statistics.mean(vals):.3f}x"
-    )
-if rows:
-    first = rows[0]
+
+def thread_sort_key(value):
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
+
+for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
+    thread_rows = [r for r in rows if r["threads"] == threads]
+    for suite in sorted({r["suite"] for r in thread_rows}):
+        suite_rows = [r for r in thread_rows if r["suite"] == suite]
+        vals = [float(r["speedup"]) for r in suite_rows]
+        serial = [float(r["serial_seconds"]) for r in suite_rows]
+        contestant = [float(r["contestant_seconds"]) for r in suite_rows]
+        print(
+            f"threads={threads} {suite}: "
+            f"serial_avg={statistics.mean(serial):.6f}s "
+            f"contestant_avg={statistics.mean(contestant):.6f}s "
+            f"speedup_avg={statistics.mean(vals):.3f}x"
+        )
+    first = thread_rows[0]
     print(
         "ir: "
+        f"threads={threads} "
         f"submit_deps={first['ir_submit_deps']} "
         f"submit_plain={first['ir_submit_plain']} "
         f"wait_calls={first['ir_wait_calls']} "
         f"trsm_calls={first['ir_trsm_calls']} "
         f"madd_calls={first['ir_madd_calls']}"
     )
-    speedups = [float(r["speedup"]) for r in rows]
-    serial_total = sum(float(r["serial_seconds"]) for r in rows)
-    contestant_total = sum(float(r["contestant_seconds"]) for r in rows)
+    speedups = [float(r["speedup"]) for r in thread_rows]
+    serial_total = sum(float(r["serial_seconds"]) for r in thread_rows)
+    contestant_total = sum(float(r["contestant_seconds"]) for r in thread_rows)
     positive_speedups = [value for value in speedups if value > 0]
     if positive_speedups:
         speedup_geo = math.exp(
@@ -372,46 +396,51 @@ if rows:
         speedup_geo = 0.0
     print(
         "overall: "
-        f"runs={len(rows)} "
+        f"threads={threads} "
+        f"runs={len(thread_rows)} "
         f"serial_total={serial_total:.6f}s "
         f"contestant_total={contestant_total:.6f}s "
         f"speedup_avg={statistics.mean(speedups):.3f}x "
         f"speedup_geo={speedup_geo:.3f}x"
     )
 if rows and any(r.get("profile_enabled") == "1" for r in rows):
-    decision_rows = [r for r in rows if int(r.get("async_decisions") or 0) > 0]
-    if decision_rows:
-        print(
-            "async_decisions: "
-            f"enabled={sum(int(r['async_enabled']) for r in decision_rows)} "
-            f"disabled={sum(int(r['async_disabled']) for r in decision_rows)} "
-            f"small_b={sum(int(r['async_disabled_small_b']) for r in decision_rows)} "
-            f"small_blocks={sum(int(r['async_disabled_small_blocks']) for r in decision_rows)} "
-            f"threads={sum(int(r['async_disabled_threads']) for r in decision_rows)} "
-            f"single_block={sum(int(r['async_disabled_single_block']) for r in decision_rows)}"
-        )
-    task_rows = [r for r in rows if int(r.get("total_tasks") or 0) > 0]
-    if task_rows:
-        print(
-            "profile: "
-            f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
-            f"runtime_batch_max={max(int(r['runtime_batch_max']) for r in task_rows)} "
-            f"ready_avg_avg={statistics.mean(float(r['ready_avg']) for r in task_rows):.3f} "
-            f"ready_per_thread_avg={statistics.mean(float(r['ready_per_thread']) for r in task_rows):.3f} "
-            f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
-            f"dag_satisfied_deps_avg={statistics.mean(int(r['dag_satisfied_deps']) for r in task_rows):.1f} "
-            f"dag_missing_deps={sum(int(r['dag_missing_deps']) for r in task_rows)} "
-            f"dag_release_batches_avg={statistics.mean(int(r['dag_release_batches']) for r in task_rows):.1f} "
-            f"max_dag_release_batch={max(int(r['max_dag_release_batch']) for r in task_rows)} "
-            f"max_dag_successors={max(int(r['max_dag_successors']) for r in task_rows)} "
-            f"max_dag_live={max(int(r['max_dag_live']) for r in task_rows)} "
-            f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
-            f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f} "
-            f"main_wait_ms_avg={statistics.mean(float(r['main_wait_ms']) for r in task_rows):.3f} "
-            f"wait_ms_avg={statistics.mean(float(r['wait_ms']) for r in task_rows):.3f} "
-            f"wait_ready_avg={statistics.mean(float(r['wait_ready_avg']) for r in task_rows):.3f} "
-            f"wait_active_avg={statistics.mean(float(r['wait_active_avg']) for r in task_rows):.3f} "
-            f"wait_dag_live_avg={statistics.mean(float(r['wait_dag_live_avg']) for r in task_rows):.3f} "
-            f"max_wait_dag_live={max(int(r['max_wait_dag_live']) for r in task_rows)}"
-        )
+    for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
+        thread_rows = [r for r in rows if r["threads"] == threads]
+        decision_rows = [r for r in thread_rows if int(r.get("async_decisions") or 0) > 0]
+        if decision_rows:
+            print(
+                "async_decisions: "
+                f"threads={threads} "
+                f"enabled={sum(int(r['async_enabled']) for r in decision_rows)} "
+                f"disabled={sum(int(r['async_disabled']) for r in decision_rows)} "
+                f"small_b={sum(int(r['async_disabled_small_b']) for r in decision_rows)} "
+                f"small_blocks={sum(int(r['async_disabled_small_blocks']) for r in decision_rows)} "
+                f"threads_disabled={sum(int(r['async_disabled_threads']) for r in decision_rows)} "
+                f"single_block={sum(int(r['async_disabled_single_block']) for r in decision_rows)}"
+            )
+        task_rows = [r for r in thread_rows if int(r.get("total_tasks") or 0) > 0]
+        if task_rows:
+            print(
+                "profile: "
+                f"threads={threads} "
+                f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
+                f"runtime_batch_max={max(int(r['runtime_batch_max']) for r in task_rows)} "
+                f"ready_avg_avg={statistics.mean(float(r['ready_avg']) for r in task_rows):.3f} "
+                f"ready_per_thread_avg={statistics.mean(float(r['ready_per_thread']) for r in task_rows):.3f} "
+                f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
+                f"dag_satisfied_deps_avg={statistics.mean(int(r['dag_satisfied_deps']) for r in task_rows):.1f} "
+                f"dag_missing_deps={sum(int(r['dag_missing_deps']) for r in task_rows)} "
+                f"dag_release_batches_avg={statistics.mean(int(r['dag_release_batches']) for r in task_rows):.1f} "
+                f"max_dag_release_batch={max(int(r['max_dag_release_batch']) for r in task_rows)} "
+                f"max_dag_successors={max(int(r['max_dag_successors']) for r in task_rows)} "
+                f"max_dag_live={max(int(r['max_dag_live']) for r in task_rows)} "
+                f"queue_ms_avg={statistics.mean(float(r['queue_ms']) for r in task_rows):.3f} "
+                f"exec_ms_avg={statistics.mean(float(r['exec_ms']) for r in task_rows):.3f} "
+                f"main_wait_ms_avg={statistics.mean(float(r['main_wait_ms']) for r in task_rows):.3f} "
+                f"wait_ms_avg={statistics.mean(float(r['wait_ms']) for r in task_rows):.3f} "
+                f"wait_ready_avg={statistics.mean(float(r['wait_ready_avg']) for r in task_rows):.3f} "
+                f"wait_active_avg={statistics.mean(float(r['wait_active_avg']) for r in task_rows):.3f} "
+                f"wait_dag_live_avg={statistics.mean(float(r['wait_dag_live_avg']) for r in task_rows):.3f} "
+                f"max_wait_dag_live={max(int(r['max_wait_dag_live']) for r in task_rows)}"
+            )
 PY
