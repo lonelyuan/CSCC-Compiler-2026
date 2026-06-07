@@ -12,6 +12,9 @@ CLANG_BIN="${CLANG:-/opt/bisheng/bin/clang++}"
 OPT_BIN="${OPT:-/opt/bisheng/bin/opt}"
 LLVM_LINK_BIN="${LLVM_LINK:-/opt/bisheng/bin/llvm-link}"
 THREADS="${COMPILER2026_DAG_THREADS:-4}"
+PROFILE="${COMPILER2026_DAG_PROFILE:-0}"
+TASK_BATCH="${COMPILER2026_TASK_BATCH:-auto}"
+ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-32}"
 
 "${SUBMISSION_DIR}/scripts/build.sh"
 
@@ -76,6 +79,9 @@ COMPILER2026_TIMING_FILE="${SMOKE_DIR}/serial.time" \
 
 COMPILER2026_TIMING_FILE="${SMOKE_DIR}/contestant.time" \
 COMPILER2026_DAG_THREADS="${THREADS}" \
+COMPILER2026_DAG_PROFILE="${PROFILE}" \
+COMPILER2026_TASK_BATCH="${TASK_BATCH}" \
+COMPILER2026_ASYNC_MIN_B="${ASYNC_MIN_B}" \
   "${SMOKE_DIR}/bin/contestant_app" \
   "${SMOKE_DIR}/input.bin" \
   "${SMOKE_DIR}/contestant.out"
@@ -103,4 +109,3 @@ PY
 echo "contestant_app=${SMOKE_DIR}/bin/contestant_app"
 echo "serial_verify=${SMOKE_DIR}/serial.verify"
 echo "contestant_verify=${SMOKE_DIR}/contestant.verify"
-

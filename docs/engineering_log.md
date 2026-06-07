@@ -580,3 +580,28 @@
 - 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.958378s contestant_total=0.648671s speedup_avg=1.509x speedup_geo=1.481x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.234`、`ready_per_thread_avg=20.308`、`dag_edges_avg=4530.2`、`dag_satisfied_deps_avg=7429.8`、`dag_missing_deps=0`、`dag_release_batches_avg=295.2`、`max_dag_release_batch=108`、`max_dag_live=504`、`wait_dag_live_avg=88.756`、`max_wait_dag_live=487`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 smoke runtime environment passthrough
+
+改动：
+
+- `smoke_test.sh` 现在向 contestant 透传 `COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH` 和 `COMPILER2026_ASYNC_MIN_B`，与原有 `COMPILER2026_DAG_THREADS` 保持同一套 runtime knob。
+- smoke 与 benchmark 的调参入口保持一致，小范围 verifier run 可以直接验证 async 阈值、profile 输出和 batch 覆盖是否真实生效。
+- 归档 `smoke_env_passthrough_profile_smoke.csv`，确认常规 benchmark 路径未受脚本改动影响。
+
+经验：
+
+- 本轮前 smoke 只透传线程数；用 `COMPILER2026_ASYNC_MIN_B=9999` 做小 case 对照时，contestant 仍使用默认阈值，容易误判调参结果。
+- 修复后 `SPEC_START=80 SPEC_END=80 COMPILER2026_DAG_PROFILE=1 COMPILER2026_ASYNC_MIN_B=9999 ./submission/scripts/smoke_test.sh` 输出 `threshold=9999 enabled=0 reason=small_b`；默认阈值同一 case 输出 `threshold=32 enabled=1 reason=enabled` 并产生 runtime profile。
+- 这是验证基础设施修复，不改变 runtime 调度策略或 Pass IR 插桩。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=80 SPEC_END=80 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 COMPILER2026_ASYNC_MIN_B=9999 ./submission/scripts/smoke_test.sh` verifier 通过，并确认 async 被阈值禁用。
+- `SPEC_START=80 SPEC_END=80 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh` verifier 通过，并确认默认 async path/profile 生效。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.842x`。
+- `LABEL=smoke_env_passthrough_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/smoke_env_passthrough_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962081s contestant_total=0.644859s speedup_avg=1.519x speedup_geo=1.491x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.607`、`ready_per_thread_avg=20.152`、`dag_edges_avg=4662.0`、`dag_satisfied_deps_avg=7298.0`、`dag_missing_deps=0`、`dag_release_batches_avg=298.2`、`max_dag_release_batch=89`、`max_dag_live=500`、`wait_dag_live_avg=88.015`、`max_wait_dag_live=500`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
