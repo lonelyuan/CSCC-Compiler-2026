@@ -1000,3 +1000,28 @@
 - `LABEL=sync_cholesky_default_guard_repeat3_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/sync_cholesky_default_guard_repeat3_final.csv`。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_sync_cholesky_profile_final_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_sync_cholesky_profile_final_smoke.csv`。
 - `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。
+
+## 2026-06-08 rejected cross-panel reserve sizing
+
+尝试：
+
+- runtime 的 `reserveTaskCount(n, b)` 从 panel-local 首 panel容量估算扩展为 cross-panel aware 估算。
+- 当 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 时，按整轮 block DAG 的 `cholesky + trsm + madd` 上界预留 `dag_nodes_`，按依赖数上界预留 `successor_edges_`，按 lower-triangular block 数预留 producer 表。
+- 为避免 hidden 大规模小 block case 一次性预留过大，实验实现对 nodes/edges/producers reserve 分别加了上限。
+
+结果：
+
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_reserve_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_reserve_profile_smoke.csv`；summary 为 `contestant_total=0.663732s speedup_geo=1.503x max_dag_live=2065`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_sync_cholesky_reserve_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_sync_cholesky_reserve_profile_smoke.csv`；summary 为 `contestant_total=0.662763s speedup_geo=1.532x max_dag_live=1056`。
+
+结论：
+
+- 这两个结果都没有超过对应旧实验记录；尤其 sync-cholesky 旧 profile smoke 为 `contestant_total=0.660494s speedup_geo=1.534x`。
+- 预留容量能减少一部分扩容/rehash 可能性，但当前 4 vCPU VM 上 cross-panel 的主瓶颈仍是依赖维护、ready queue 调度和 wait/queue pressure，不是 vector/hash 初始容量。
+- 代码改动已回退，只保留 CSV 和日志，避免把无收益的 reserve complexity 留在 runtime 默认框架里。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- 回退后 `submission/runtime/dag_runtime.cpp` 无未提交 diff。
