@@ -728,16 +728,27 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
         return 1;
     }
 
+    std::size_t batch = 1;
     if (b <= 32) {
-        return 16;
+        batch = 16;
+    } else if (b <= 64) {
+        batch = 8;
+    } else if (b <= 128) {
+        batch = 4;
     }
-    if (b <= 64) {
-        return 8;
+
+    const std::size_t participants = worker_threads + 1;
+    const std::size_t blocks = static_cast<std::size_t>(block_count);
+    if (blocks <= participants * 2) {
+        return 1;
     }
-    if (b <= 128) {
-        return 4;
+    if (blocks <= participants * 4) {
+        return std::min<std::size_t>(batch, 2);
     }
-    return 1;
+    if (blocks <= participants * 8) {
+        return std::min<std::size_t>(batch, 4);
+    }
+    return batch;
 }
 
 AsyncRuntime &activeRuntime() {

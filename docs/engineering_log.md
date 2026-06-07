@@ -434,3 +434,28 @@
 - `LABEL=ready_width_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/ready_width_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.949592s contestant_total=0.643393s speedup_avg=1.510x speedup_geo=1.479x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`ready_avg_avg=73.825`、`ready_per_thread_avg=18.456`、`dag_edges_avg=5308.8`、`dag_satisfied_deps_avg=6651.2`、`dag_missing_deps=0`、`max_dag_live=525`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 adaptive runtime batch
+
+改动：
+
+- 默认 `selectTaskBatchSize` 不再只看 `b`，同时参考 `block_count = n / b` 和参与线程数。小 block 仍保留较大批量上限，但当 panel block 数相对线程数较少时自动收窄到 `1/2/4`，避免小 panel 下过度批量出队。
+- `COMPILER2026_TASK_BATCH` 显式环境覆盖保持优先级不变，仍用于真实平台调参。
+- benchmark CSV 新增 `runtime_batch_avg` 和 `runtime_batch_max`，从 runtime profile 的 `batch=` 字段解析 auto 模式实际生效的批量。
+
+经验：
+
+- `task_batch=auto` 只是实验配置标签，不足以证明 runtime 选了什么批量；必须把 profile 中的实际 `batch` 汇总进 CSV。
+- 只按 `b` 选择 batch 会忽略 panel 宽度。`block_count` 接近线程数时，大批量出队容易降低公平性；block 数足够大时，保留批量仍能减少全局队列锁开销。
+- 这是默认调度启发式变化，不改变 Pass 依赖恢复，也不改变 task function 对官方 `trsm/madd` ABI 的直接调用。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.829x`。
+- `LABEL=adaptive_batch_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/adaptive_batch_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962757s contestant_total=0.646104s speedup_avg=1.514x speedup_geo=1.486x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=82.026`、`ready_per_thread_avg=20.506`、`dag_edges_avg=4847.8`、`dag_satisfied_deps_avg=7112.2`、`dag_missing_deps=0`、`max_dag_live=504`。
+- CSV 显示本轮 auto batch 已按 suite 收窄：`n512_576 runtime_batch_max=4`、`n768 runtime_batch_max=4`、`n1024 runtime_batch_max=4`、`n1152_small_b runtime_batch_max=16`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
