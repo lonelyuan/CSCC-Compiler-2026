@@ -271,6 +271,10 @@ public:
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
         flushPendingTasks();
+        if (profiling) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            recordWaitEntryLocked();
+        }
         if (workers_.empty()) {
             recordWaitProfile(profiling, wait_enter_ns);
             return;
@@ -506,6 +510,16 @@ private:
         max_dag_release_batch_ = std::max(max_dag_release_batch_, released);
     }
 
+    void recordWaitEntryLocked() {
+        const std::size_t ready = tasks_.size() - task_head_;
+        wait_ready_sum_ += ready;
+        wait_active_sum_ += active_tasks_;
+        wait_dag_live_sum_ += pending_dag_tasks_;
+        max_wait_ready_ = std::max(max_wait_ready_, ready);
+        max_wait_active_ = std::max(max_wait_active_, active_tasks_);
+        max_wait_dag_live_ = std::max(max_wait_dag_live_, pending_dag_tasks_);
+    }
+
     void recordWaitProfile(bool profiling, std::uint64_t wait_enter_ns) {
         if (!profiling) {
             return;
@@ -568,6 +582,9 @@ private:
         main_wait_ns_ = 0;
         wait_total_ns_ = 0;
         wait_calls_ = 0;
+        wait_ready_sum_ = 0;
+        wait_active_sum_ = 0;
+        wait_dag_live_sum_ = 0;
         submit_flushes_ = 0;
         dequeue_batches_ = 0;
         profile_dag_nodes_ = 0;
@@ -583,6 +600,9 @@ private:
         max_dag_successors_ = 0;
         max_dag_live_ = 0;
         max_dag_release_batch_ = 0;
+        max_wait_ready_ = 0;
+        max_wait_active_ = 0;
+        max_wait_dag_live_ = 0;
         max_dequeue_batch_ = 0;
         max_ready_tasks_ = 0;
         task_profile_count_ = 0;
@@ -605,7 +625,9 @@ private:
                      "dag_released=%llu dag_release_batches=%llu "
                      "max_dag_release_batch=%zu max_dag_pending=%zu max_dag_successors=%zu "
                      "max_dag_live=%zu queue_ms=%.3f exec_ms=%.3f worker_idle_ms=%.3f "
-                     "main_wait_ms=%.3f wait_calls=%llu wait_ms=%.3f\n",
+                     "main_wait_ms=%.3f wait_calls=%llu wait_ms=%.3f "
+                     "wait_ready_sum=%llu wait_active_sum=%llu wait_dag_live_sum=%llu "
+                     "max_wait_ready=%zu max_wait_active=%zu max_wait_dag_live=%zu\n",
                      n_, b_, total_threads_, workers_.size(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
                      static_cast<unsigned long long>(main_tasks_),
@@ -629,7 +651,11 @@ private:
                      static_cast<double>(worker_idle_ns_) / 1000000.0,
                      static_cast<double>(main_wait_ns_) / 1000000.0,
                      static_cast<unsigned long long>(wait_calls_),
-                     static_cast<double>(wait_total_ns_) / 1000000.0);
+                     static_cast<double>(wait_total_ns_) / 1000000.0,
+                     static_cast<unsigned long long>(wait_ready_sum_),
+                     static_cast<unsigned long long>(wait_active_sum_),
+                     static_cast<unsigned long long>(wait_dag_live_sum_),
+                     max_wait_ready_, max_wait_active_, max_wait_dag_live_);
 
         for (std::size_t i = 0; i < task_profile_count_; ++i) {
             const TaskProfile &profile = task_profiles_[i];
@@ -675,6 +701,9 @@ private:
     std::uint64_t main_wait_ns_ = 0;
     std::uint64_t wait_total_ns_ = 0;
     std::uint64_t wait_calls_ = 0;
+    std::uint64_t wait_ready_sum_ = 0;
+    std::uint64_t wait_active_sum_ = 0;
+    std::uint64_t wait_dag_live_sum_ = 0;
     std::uint64_t submit_flushes_ = 0;
     std::uint64_t dequeue_batches_ = 0;
     std::uint64_t profile_dag_nodes_ = 0;
@@ -692,6 +721,9 @@ private:
     std::size_t max_dag_pending_ = 0;
     std::size_t max_dag_successors_ = 0;
     std::size_t max_dag_live_ = 0;
+    std::size_t max_wait_ready_ = 0;
+    std::size_t max_wait_active_ = 0;
+    std::size_t max_wait_dag_live_ = 0;
     std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
     std::size_t task_profile_count_ = 0;
 };

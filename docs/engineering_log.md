@@ -531,3 +531,27 @@
 - `LABEL=dag_release_batch_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_release_batch_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.972092s contestant_total=0.645926s speedup_avg=1.529x speedup_geo=1.504x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=81.272`、`ready_per_thread_avg=20.318`、`dag_edges_avg=4642.8`、`dag_satisfied_deps_avg=7317.2`、`dag_missing_deps=0`、`dag_release_batches_avg=305.0`、`max_dag_release_batch=98`、`max_dag_live=511`、`main_wait_ms_avg=1.273`、`wait_ms_avg=45.306`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 wait pressure profile
+
+改动：
+
+- runtime 在每次 `wait()` 入口记录 ready task 数、active task 数和当前 DAG live task 数的 sum/max。
+- benchmark CSV 新增 `wait_ready_avg`、`wait_active_avg`、`wait_dag_live_avg`、`max_wait_ready`、`max_wait_active`、`max_wait_dag_live`，profile summary 同步输出 wait pressure 摘要。
+- 归档 `wait_pressure_profile_smoke.csv`，用于观察当前 panel barrier 入口仍有多少可执行或未完成工作。
+
+经验：
+
+- `wait_ms` 只说明等待耗时，不说明等待入口还压着多少 ready/active/DAG 节点；跨 panel DAG 改造前需要同时看 `wait_dag_live_avg` 和 `max_wait_dag_live`。
+- 本轮 profile benchmark 显示 `wait_ready_avg=66.716`、`wait_active_avg=8.046`、`wait_dag_live_avg=88.303`、`max_wait_dag_live=486`，说明 panel wait 入口仍经常面对一批未完成 DAG 工作，后续移除 barrier 有明确观测目标。
+- 本轮只增加 profile 数据，不改变 `notify_all`、ready queue、DAG 依赖或 Pass 插桩语义。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.828x`。
+- `LABEL=wait_pressure_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/wait_pressure_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962240s contestant_total=0.643975s speedup_avg=1.522x speedup_geo=1.496x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.880`、`ready_per_thread_avg=20.220`、`dag_edges_avg=4648.5`、`dag_satisfied_deps_avg=7311.5`、`dag_missing_deps=0`、`dag_release_batches_avg=300.0`、`max_dag_release_batch=78`、`max_dag_live=486`、`main_wait_ms_avg=1.024`、`wait_ms_avg=44.950`、`wait_ready_avg=66.716`、`wait_active_avg=8.046`、`wait_dag_live_avg=88.303`、`max_wait_dag_live=486`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
