@@ -372,7 +372,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.insert(tasks_.end(), pending_tasks_.begin(),
                           pending_tasks_.begin() + pending_count_);
-            updateMaxReadyLocked(tasks_.size() - task_head_);
+            recordReadyWidthLocked(tasks_.size() - task_head_);
             if (profile_enabled_.load(std::memory_order_relaxed)) {
                 ++submit_flushes_;
             }
@@ -402,7 +402,7 @@ private:
 
     void enqueueTaskLocked(Task task) {
         tasks_.push_back(task);
-        updateMaxReadyLocked(tasks_.size() - task_head_);
+        recordReadyWidthLocked(tasks_.size() - task_head_);
     }
 
     bool completeDagTasksLocked(const Task *batch, std::size_t count) {
@@ -482,11 +482,13 @@ private:
         return profile;
     }
 
-    void updateMaxReadyLocked(std::size_t ready) {
+    void recordReadyWidthLocked(std::size_t ready) {
         if (!profile_enabled_.load(std::memory_order_relaxed)) {
             return;
         }
         max_ready_tasks_ = std::max(max_ready_tasks_, ready);
+        ++ready_width_samples_;
+        ready_width_sum_ += ready;
     }
 
     TaskProfile &profileForTaskLocked(TaskFn fn) {
@@ -548,6 +550,8 @@ private:
         profile_dag_missing_deps_ = 0;
         profile_dag_initial_ready_ = 0;
         profile_dag_released_ = 0;
+        ready_width_samples_ = 0;
+        ready_width_sum_ = 0;
         max_dag_pending_ = 0;
         max_dag_successors_ = 0;
         max_dag_live_ = 0;
@@ -567,6 +571,7 @@ private:
                      "[compiler2026_profile] n=%d b=%d threads=%zu workers=%zu "
                      "batch=%zu tasks=%llu main_tasks=%llu worker_tasks=%llu "
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
+                     "ready_samples=%llu ready_sum=%llu "
                      "dag_nodes=%llu dag_edges=%llu dag_satisfied_deps=%llu "
                      "dag_missing_deps=%llu dag_initial_ready=%llu "
                      "dag_released=%llu max_dag_pending=%zu max_dag_successors=%zu "
@@ -579,6 +584,8 @@ private:
                      static_cast<unsigned long long>(submit_flushes_),
                      static_cast<unsigned long long>(dequeue_batches_),
                      max_dequeue_batch_, max_ready_tasks_,
+                     static_cast<unsigned long long>(ready_width_samples_),
+                     static_cast<unsigned long long>(ready_width_sum_),
                      static_cast<unsigned long long>(profile_dag_nodes_),
                      static_cast<unsigned long long>(profile_dag_edges_),
                      static_cast<unsigned long long>(profile_dag_satisfied_deps_),
@@ -641,6 +648,8 @@ private:
     std::uint64_t profile_dag_missing_deps_ = 0;
     std::uint64_t profile_dag_initial_ready_ = 0;
     std::uint64_t profile_dag_released_ = 0;
+    std::uint64_t ready_width_samples_ = 0;
+    std::uint64_t ready_width_sum_ = 0;
     std::size_t max_dequeue_batch_ = 0;
     std::size_t max_ready_tasks_ = 0;
     std::size_t max_dag_pending_ = 0;

@@ -74,7 +74,7 @@ IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,async_min_b,profile_enabled,ir_submit_deps,ir_submit_plain,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_initial_ready,dag_released,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -159,6 +159,8 @@ summary_counts = {
     "worker_tasks": 0,
     "flushes": 0,
     "dequeue_batches": 0,
+    "ready_samples": 0,
+    "ready_sum": 0,
     "dag_nodes": 0,
     "dag_edges": 0,
     "dag_satisfied_deps": 0,
@@ -218,6 +220,15 @@ for line in lines:
             tasks[name]["queue_ms"] += float(values.get("queue_ms", "0"))
             tasks[name]["exec_ms"] += float(values.get("exec_ms", "0"))
 
+ready_samples = summary_counts["ready_samples"]
+ready_sum = summary_counts["ready_sum"]
+ready_avg = ready_sum / ready_samples if ready_samples > 0 else 0.0
+try:
+    configured_threads = int(threads)
+except ValueError:
+    configured_threads = 0
+ready_per_thread = ready_avg / configured_threads if configured_threads > 0 else 0.0
+
 writer = csv.writer(sys.stdout, lineterminator="\n")
 writer.writerow([
     label,
@@ -248,6 +259,10 @@ writer.writerow([
     summary_counts["dequeue_batches"],
     summary_max["max_batch"],
     summary_max["max_ready"],
+    ready_samples,
+    ready_sum,
+    f"{ready_avg:.3f}",
+    f"{ready_per_thread:.3f}",
     summary_counts["dag_nodes"],
     summary_counts["dag_edges"],
     summary_counts["dag_satisfied_deps"],
@@ -334,6 +349,8 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
         print(
             "profile: "
             f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
+            f"ready_avg_avg={statistics.mean(float(r['ready_avg']) for r in task_rows):.3f} "
+            f"ready_per_thread_avg={statistics.mean(float(r['ready_per_thread']) for r in task_rows):.3f} "
             f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "
             f"dag_satisfied_deps_avg={statistics.mean(int(r['dag_satisfied_deps']) for r in task_rows):.1f} "
             f"dag_missing_deps={sum(int(r['dag_missing_deps']) for r in task_rows)} "

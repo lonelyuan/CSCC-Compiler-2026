@@ -410,3 +410,27 @@
 - `LABEL=dag_dep_state_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/dag_dep_state_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.970238s contestant_total=0.638944s speedup_avg=1.549x speedup_geo=1.518x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`dag_edges_avg=5562.2`、`dag_satisfied_deps_avg=6397.8`、`dag_missing_deps=0`、`max_dag_live=544`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 ready width profile
+
+改动：
+
+- runtime profile 新增 `ready_samples` 和 `ready_sum`，在 ready queue 入队或批量 flush 后记录一次当前 ready 宽度。
+- benchmark CSV 新增 `ready_samples`、`ready_sum`、`ready_avg` 和 `ready_per_thread`，其中 `ready_avg = ready_sum / ready_samples`，`ready_per_thread = ready_avg / threads`。
+- profile summary 新增 `ready_avg_avg` 和 `ready_per_thread_avg`，用于观察 ready queue 平均宽度是否足以覆盖配置线程数。
+
+经验：
+
+- `max_ready` 只能说明瞬时峰值，不能说明 ready queue 是否长期有足够宽度。`ready_avg` 更适合和 `worker_idle_ms`、`main_wait_ms` 一起判断是任务过细、依赖释放不足，还是队列/批量策略本身成为瓶颈。
+- `ready_per_thread` 是调参辅助指标，不是性能结论。它需要和 verifier、实际时间、DAG fanout/live、线程数和 block size 一起看。
+- 本轮只改 profile 链路，不改变 ready queue 调度语义，也不改变 Pass 生成的依赖边。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.644x`。
+- `LABEL=ready_width_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/ready_width_profile_smoke.csv`。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.949592s contestant_total=0.643393s speedup_avg=1.510x speedup_geo=1.479x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`ready_avg_avg=73.825`、`ready_per_thread_avg=18.456`、`dag_edges_avg=5308.8`、`dag_satisfied_deps_avg=6651.2`、`dag_missing_deps=0`、`max_dag_live=525`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
