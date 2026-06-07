@@ -605,3 +605,28 @@
 - `LABEL=smoke_env_passthrough_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/smoke_env_passthrough_profile_smoke.csv`。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.962081s contestant_total=0.644859s speedup_avg=1.519x speedup_geo=1.491x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=80.607`、`ready_per_thread_avg=20.152`、`dag_edges_avg=4662.0`、`dag_satisfied_deps_avg=7298.0`、`dag_missing_deps=0`、`dag_release_batches_avg=298.2`、`max_dag_release_batch=89`、`max_dag_live=500`、`wait_dag_live_avg=88.015`、`max_wait_dag_live=500`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 block-coordinate key recovery
+
+改动：
+
+- Pass 的 key 恢复从直接 `offset / b` 改为先恢复 `block_row` 和 `block_col`：`element_row = offset / n`，`element_col = offset % n`，再分别除以 `b`。
+- 现有 runtime API 不变，Pass 将 `block_row * (n / b) + block_col` 重新组合为当前一维 dependency key。
+- 递归一维 GEP offset 累加逻辑保留，多维或无法线性化的地址表达式仍然走普通 submit/wait fallback。
+
+经验：
+
+- 这一步让 pass 内部已经显式具备 row/col 坐标，为后续表达 `cholesky(panel+1)` 和 `trsm(row,panel+1)` 的跨 panel 依赖做准备，同时不改变 runtime 的通用 key 接口。
+- 公开 profile benchmark 仍显示 `dag_missing_deps=0`，说明坐标化 key 与当前 latest-producer DAG 匹配。
+- 本轮不是性能优化；速度波动只作为回归信号，不能解读为调度收益。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `./submission/scripts/build.sh` 在 VM 通过。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.835x`。
+- `LABEL=block_coordinate_key_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/block_coordinate_key_smoke.csv`。
+- 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
+- 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.956868s contestant_total=0.647151s speedup_avg=1.509x speedup_geo=1.485x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=82.514`、`ready_per_thread_avg=20.629`、`dag_edges_avg=4987.0`、`dag_satisfied_deps_avg=6973.0`、`dag_missing_deps=0`、`dag_release_batches_avg=301.5`、`max_dag_release_batch=147`、`max_dag_live=487`、`wait_dag_live_avg=90.232`、`max_wait_dag_live=484`。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

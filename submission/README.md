@@ -76,9 +76,10 @@ Current implementation:
 - It keeps the original function body as the small-block serial path.
 - It clones an async implementation for `b >= 32`, keeps `cholesky`
   synchronous, outlines async-path `trsm` and `madd`
-  calls into generated IR task functions, recovers block keys from direct or
-  nested one-dimensional GEP offsets, and inserts dependency-aware runtime
-  submits plus panel-end waits.
+  calls into generated IR task functions, recovers block coordinates from
+  direct or nested one-dimensional GEP offsets, converts them to the runtime's
+  current linear dependency keys, and inserts dependency-aware runtime submits
+  plus panel-end waits.
 - The runtime is a generic reusable task scheduler with arena context
   allocation, adaptive task submit/dequeue batching, an opt-in profiling mode,
   and a panel-local ready queue for `trsm` to `madd` dependencies. Official

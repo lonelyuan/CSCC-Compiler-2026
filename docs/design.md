@@ -181,7 +181,7 @@ Pass 和 runtime 当前共同保证：
 ## 当前限制
 
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
-- block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
+- block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；Pass 会先用 `n` / `b` 从 element offset 恢复 block row/col，再组合成 runtime 现有的一维 key。如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
 - 当前默认异步阈值 `b >= 32` 是公开 benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B` 可用于实验覆盖，`b >= 16` 实验触发过段错误，已回退。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，但尚未闭环成自动调优。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。

@@ -136,7 +136,7 @@ flowchart TD
 
 ## 3. 当前实现采用的保守调度
 
-当前 Pass 已经恢复一版基于一维 `GEPOperator` offset 的 block key，并能递归累加嵌套一维 GEP offset，用 runtime ready queue 表达 panel 内 `trsm -> madd` 依赖。跨 panel 依赖仍然保守，进入下一 panel 前保留 barrier。
+当前 Pass 已经恢复一版基于一维 `GEPOperator` offset 的 block 坐标，并能递归累加嵌套一维 GEP offset。Pass 从 element offset 推导 block row/col，再组合成 runtime 现有的一维 key，用 ready queue 表达 panel 内 `trsm -> madd` 依赖。跨 panel 依赖仍然保守，进入下一 panel 前保留 barrier。
 
 对每个 panel：
 
@@ -294,7 +294,7 @@ void compiler2026_runtime_end();
 
 `runtime_register_task` 只在打开 `COMPILER2026_DAG_PROFILE=1` 时给统计输出提供名字，例如 `trsm`、`madd`；它不改变任务执行方式，也不把官方算子封装进 runtime。
 
-`runtime_submit_deps` 是第一版动态 DAG 接口。Pass 从 `L[row*n+col]` 这类 GEP offset 中算出 block key；如果地址被拆成嵌套的一维 GEP，Pass 会先递归累加 element offset，再生成 block key。随后 Pass 把 `madd` 的两个输入 block key 和输出 block key 交给 runtime。runtime 只维护“哪个 key 最近由哪个 task 生产”和 successor 列表，不需要知道 Cholesky 的数学含义。
+`runtime_submit_deps` 是第一版动态 DAG 接口。Pass 从 `L[row*n+col]` 这类 GEP offset 中恢复 block row/col；如果地址被拆成嵌套的一维 GEP，Pass 会先递归累加 element offset，再用 `n` / `b` 推导坐标并重新组合成 runtime key。随后 Pass 把 `madd` 的两个输入 block key 和输出 block key 交给 runtime。runtime 只维护“哪个 key 最近由哪个 task 生产”和 successor 列表，不需要知道 Cholesky 的数学含义。
 
 当前 runtime 做了几项优化：
 

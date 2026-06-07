@@ -47,6 +47,12 @@ struct TaskIr {
     llvm::Function *madd_task;
 };
 
+struct BlockCoordinate {
+    llvm::Value *row;
+    llvm::Value *col;
+    llvm::Value *linear_key;
+};
+
 bool isBlockCholesky(llvm::Function &function) {
     if (function.isDeclaration()) {
         return false;
@@ -276,8 +282,9 @@ std::optional<llvm::Value *> buildLinearElementOffset(llvm::IRBuilder<> &builder
     return offset;
 }
 
-std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Value *ptr,
-                                           llvm::Value *b) {
+std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
+                                                   llvm::Value *ptr,
+                                                   llvm::Value *n, llvm::Value *b) {
     llvm::Module *module = builder.GetInsertBlock()->getModule();
     llvm::Type *offset_ty = llvm::IntegerType::get(
         module->getContext(), module->getDataLayout().getPointerSizeInBits());
@@ -286,35 +293,47 @@ std::optional<llvm::Value *> buildBlockKey(llvm::IRBuilder<> &builder, llvm::Val
         return std::nullopt;
     }
 
+    llvm::Value *wide_n = builder.CreateSExtOrTrunc(n, (*offset)->getType());
     llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, (*offset)->getType());
-    llvm::Value *element_block = builder.CreateSDiv(*offset, wide_b);
-    return builder.CreateTruncOrBitCast(element_block, builder.getInt32Ty());
+    llvm::Value *element_row = builder.CreateSDiv(*offset, wide_n);
+    llvm::Value *element_col = builder.CreateSRem(*offset, wide_n);
+    llvm::Value *block_row = builder.CreateSDiv(element_row, wide_b);
+    llvm::Value *block_col = builder.CreateSDiv(element_col, wide_b);
+    llvm::Value *block_count = builder.CreateSDiv(wide_n, wide_b);
+    llvm::Value *linear_key = builder.CreateAdd(
+        builder.CreateMul(block_row, block_count), block_col);
+    return BlockCoordinate{
+        block_row,
+        block_col,
+        builder.CreateTruncOrBitCast(linear_key, builder.getInt32Ty()),
+    };
 }
 
 bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
                                       TaskIr &task_ir, llvm::Function *task_fn,
-                                      llvm::Value *b, llvm::ArrayRef<unsigned> dep_args,
-                                      unsigned output_arg) {
+                                      llvm::Value *n, llvm::Value *b,
+                                      llvm::ArrayRef<unsigned> dep_args, unsigned output_arg) {
     llvm::Module *module = call->getModule();
     llvm::IRBuilder<> builder(call);
 
     std::vector<llvm::Value *> dep_keys;
     dep_keys.reserve(2);
     for (unsigned arg_index : dep_args) {
-        std::optional<llvm::Value *> key = buildBlockKey(builder, call->getArgOperand(arg_index), b);
-        if (!key) {
+        std::optional<BlockCoordinate> coord =
+            buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b);
+        if (!coord) {
             return false;
         }
-        dep_keys.push_back(*key);
+        dep_keys.push_back(coord->linear_key);
     }
 
     while (dep_keys.size() < 2) {
         dep_keys.push_back(builder.getInt32(-1));
     }
 
-    std::optional<llvm::Value *> output_key =
-        buildBlockKey(builder, call->getArgOperand(output_arg), b);
-    if (!output_key) {
+    std::optional<BlockCoordinate> output_coord =
+        buildBlockCoordinate(builder, call->getArgOperand(output_arg), n, b);
+    if (!output_coord) {
         return false;
     }
 
@@ -331,7 +350,7 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
     }
 
     builder.CreateCall(runtime.submit_deps,
-                       {task_fn, context, dep_keys[0], dep_keys[1], *output_key});
+                       {task_fn, context, dep_keys[0], dep_keys[1], output_coord->linear_key});
     call->eraseFromParent();
     return true;
 }
@@ -377,7 +396,7 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
 
     for (llvm::CallBase *call : trsm_calls) {
         if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                              b, {}, 0)) {
+                                              n, b, {}, 0)) {
             llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
             addLoopExitWaits(loop, runtime.wait, wait_blocks);
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
@@ -390,7 +409,7 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
         addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
         if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                              b, {0, 1}, 2)) {
+                                              n, b, {0, 1}, 2)) {
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
         }
     }
