@@ -386,6 +386,100 @@ public:
         recordWaitProfile(profiling, wait_enter_ns);
     }
 
+    __attribute__((noinline, cold)) void waitForKey(int key) {
+        if (key < 0) {
+            return;
+        }
+
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
+        flushPendingTasks();
+        if (workers_.empty()) {
+            recordWaitProfile(profiling, wait_enter_ns);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (profiling) {
+                recordWaitEntryLocked();
+            }
+        }
+
+        try {
+            while (true) {
+                std::array<Task, kMaxTaskBatch> batch{};
+                std::size_t batch_count = 0;
+                bool dag_deadlock = false;
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    auto producer = latest_producer_.find(key);
+                    if (producer == latest_producer_.end() ||
+                        dag_nodes_[static_cast<std::size_t>(producer->second)].completed) {
+                        break;
+                    }
+
+                    if (task_head_ < tasks_.size()) {
+                        batch_count = takeReadyTasksLocked(batch.data());
+                    } else if (active_tasks_ == 0) {
+                        dag_deadlock = true;
+                    } else {
+                        const bool wait_profiling =
+                            profile_enabled_.load(std::memory_order_relaxed);
+                        const std::uint64_t wait_start_ns =
+                            wait_profiling ? nowNs() : 0;
+                        done_cv_.wait_for(lock, std::chrono::microseconds(10));
+                        if (wait_profiling) {
+                            main_wait_ns_ += nowNs() - wait_start_ns;
+                        }
+                        continue;
+                    }
+                }
+
+                if (dag_deadlock) {
+                    throw std::runtime_error(
+                        "compiler2026 runtime DAG key wait has unresolved dependencies");
+                }
+
+                BatchProfile profile =
+                    runBatch(batch.data(), batch_count,
+                             profile_enabled_.load(std::memory_order_relaxed));
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    active_tasks_ -= batch_count;
+                    const std::size_t released =
+                        completeDagTasksLocked(batch.data(), batch_count);
+                    recordBatchProfileLocked(batch.data(), batch_count, profile, false);
+                    recordDagReleaseBatchLocked(released);
+                    if (released > 0) {
+                        work_cv_.notify_all();
+                    }
+                    if (tasks_.empty() && active_tasks_ == 0) {
+                        done_cv_.notify_all();
+                    }
+                }
+            }
+        } catch (...) {
+            recordWaitProfile(profiling, wait_enter_ns);
+            throw;
+        }
+
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (worker_error_) {
+                error = worker_error_;
+                worker_error_ = nullptr;
+            }
+        }
+        if (error) {
+            recordWaitProfile(profiling, wait_enter_ns);
+            std::rethrow_exception(error);
+        }
+        recordWaitProfile(profiling, wait_enter_ns);
+    }
+
 private:
     void workerLoop() {
         while (true) {
@@ -1029,6 +1123,10 @@ extern "C" void compiler2026_runtime_submit_deps3(TaskFn fn, void *context,
 
 extern "C" void compiler2026_runtime_wait() {
     activeRuntime().wait();
+}
+
+extern "C" void compiler2026_runtime_wait_key(int key) {
+    activeRuntime().waitForKey(key);
 }
 
 extern "C" void compiler2026_runtime_end() {

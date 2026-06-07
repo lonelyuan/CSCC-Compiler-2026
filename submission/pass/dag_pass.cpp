@@ -30,6 +30,7 @@ constexpr const char *kSubmitDeps3 = "compiler2026_runtime_submit_deps3";
 constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kShouldAsync = "compiler2026_runtime_should_async";
 constexpr const char *kWait = "compiler2026_runtime_wait";
+constexpr const char *kWaitKey = "compiler2026_runtime_wait_key";
 constexpr const char *kEnd = "compiler2026_runtime_end";
 constexpr int kNoOutputKey = -1;
 
@@ -76,6 +77,11 @@ bool isBlockCholesky(llvm::Function &function) {
 
 bool crossPanelDagEnabledFromEnv() {
     const char *env = std::getenv("COMPILER2026_ENABLE_CROSS_PANEL_DAG");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool crossPanelSyncCholeskyEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
@@ -184,18 +190,6 @@ TaskIr getTaskIr(llvm::Module &module) {
     llvm::FunctionType *operator_ty =
         llvm::FunctionType::get(llvm::Type::getVoidTy(context),
                                 {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
-    llvm::FunctionType *cholesky_ty =
-        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
-                                {ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
-
-    llvm::Function *cholesky_task = module.getFunction("compiler2026_task_cholesky");
-    if (cholesky_task == nullptr) {
-        cholesky_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
-                                               "compiler2026_task_cholesky", module);
-        cholesky_task->addFnAttr("compiler2026.skip");
-        buildCholeskyTaskBody(module, context_ty, cholesky_task,
-                              module.getOrInsertFunction("cholesky", cholesky_ty));
-    }
 
     llvm::Function *trsm_task = module.getFunction("compiler2026_task_trsm");
     if (trsm_task == nullptr) {
@@ -215,7 +209,30 @@ TaskIr getTaskIr(llvm::Module &module) {
                               module.getOrInsertFunction("madd", operator_ty));
     }
 
-    return {context_ty, cholesky_task, trsm_task, madd_task};
+    return {context_ty, nullptr, trsm_task, madd_task};
+}
+
+llvm::Function *getCholeskyTask(llvm::Module &module, llvm::StructType *context_ty) {
+    llvm::Function *cholesky_task = module.getFunction("compiler2026_task_cholesky");
+    if (cholesky_task != nullptr) {
+        return cholesky_task;
+    }
+
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::FunctionType *task_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context), {ptr_ty}, false);
+    llvm::FunctionType *cholesky_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                {ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+
+    cholesky_task = llvm::Function::Create(task_ty, llvm::GlobalValue::InternalLinkage,
+                                           "compiler2026_task_cholesky", module);
+    cholesky_task->addFnAttr("compiler2026.skip");
+    buildCholeskyTaskBody(module, context_ty, cholesky_task,
+                          module.getOrInsertFunction("cholesky", cholesky_ty));
+    return cholesky_task;
 }
 
 void addLoopExitWaits(llvm::Loop *loop, llvm::FunctionCallee wait,
@@ -377,6 +394,25 @@ std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
     };
 }
 
+bool insertWaitForBlockKey(llvm::CallBase *call, llvm::Value *n, llvm::Value *b,
+                           unsigned arg_index) {
+    if (arg_index >= call->arg_size()) {
+        return false;
+    }
+
+    llvm::IRBuilder<> builder(call);
+    std::optional<BlockCoordinate> coord =
+        buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b);
+    if (!coord) {
+        return false;
+    }
+
+    llvm::FunctionCallee wait_key =
+        declareVoidRuntime(*call->getModule(), kWaitKey, {builder.getInt32Ty()});
+    builder.CreateCall(wait_key, {coord->linear_key});
+    return true;
+}
+
 bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
                                       TaskIr &task_ir, llvm::Function *task_fn,
                                       llvm::Value *n, llvm::Value *b,
@@ -498,14 +534,43 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
     }
 
     std::set<llvm::BasicBlock *> wait_blocks;
-    const bool can_cross_panel =
-        crossPanelDagEnabledFromEnv() &&
+    const bool cross_panel_enabled = crossPanelDagEnabledFromEnv();
+    const bool sync_cholesky = crossPanelSyncCholeskyEnabledFromEnv();
+    const bool can_cross_panel_sync =
+        cross_panel_enabled &&
+        sync_cholesky &&
+        !cholesky_calls.empty() &&
+        callsHaveCoordinates(cholesky_calls, {0}) &&
+        callsHaveCoordinates(trsm_calls, {0, 1, 2}) &&
+        callsHaveCoordinates(madd_calls, {0, 1, 2});
+    const bool can_cross_panel_task =
+        cross_panel_enabled &&
+        !sync_cholesky &&
         !cholesky_calls.empty() &&
         callsHaveCoordinates(cholesky_calls, {0, 1}) &&
         callsHaveCoordinates(trsm_calls, {0, 1, 2}) &&
         callsHaveCoordinates(madd_calls, {0, 1, 2});
 
-    if (can_cross_panel) {
+    if (can_cross_panel_sync) {
+        for (llvm::CallBase *call : cholesky_calls) {
+            if (!insertWaitForBlockKey(call, n, b, 0)) {
+                return;
+            }
+        }
+
+        for (llvm::CallBase *call : trsm_calls) {
+            replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
+                                             n, b, {0, 1}, 2);
+        }
+
+        for (llvm::CallBase *call : madd_calls) {
+            llvm::Loop *outer_loop = outermostLoop(loop_info.getLoopFor(call->getParent()));
+            replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
+                                             n, b, {0, 1, 2}, 2);
+            addLoopExitWaits(outer_loop, runtime.wait, wait_blocks);
+        }
+    } else if (can_cross_panel_task) {
+        task_ir.cholesky_task = getCholeskyTask(*async_fn.getParent(), task_ir.context_ty);
         entry_builder.CreateCall(runtime.register_task,
                                  {task_ir.cholesky_task,
                                   entry_builder.CreateGlobalStringPtr("cholesky")});

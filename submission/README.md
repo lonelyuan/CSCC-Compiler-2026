@@ -119,6 +119,14 @@ window and ready tasks exist, the submitting thread runs a small ready batch
 before continuing. The default is `0`, so the current panel-local path is not
 changed unless the variable is set.
 
+Set `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` together with
+`COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` to use the newer experimental lowering:
+`cholesky` stays as the original synchronous ABI call, while the pass inserts a
+generic `runtime_wait_key(block)` before each panel factorization and continues
+to submit `trsm/madd` into the cross-panel DAG. This reduces extra cholesky
+tasks and remains opt-in until verifier and repeat benchmark data justify a
+default change.
+
 Package artifacts:
 
 ```bash
@@ -156,6 +164,10 @@ Current implementation:
   lowering where Pass-generated `cholesky`, `trsm`, and `madd` task functions
   directly call the official ABI operators. The default remains panel-local
   because current VM evidence shows lower overhead and better geomean speedup.
+- `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` changes that experimental lowering
+  to keep `cholesky` synchronous and wait only for the needed dependency key
+  before the call. The runtime interface is still generic and only sees integer
+  block keys.
 - `COMPILER2026_DAG_MAX_LIVE` is an opt-in live-window control for that
   experimental path; it is intended for target-platform tuning, not as a new
   default.

@@ -973,3 +973,30 @@
 - `git diff --check` 通过。
 - `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.635x`。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=dag_first_touch_cross_panel_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/dag_first_touch_cross_panel_profile_smoke.csv`；summary 包含 `dag_missing_deps=7595 dag_first_touch_deps=7595`。
+
+## 2026-06-08 cross-panel sync cholesky key wait
+
+改动：
+
+- 新增实验开关 `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1`，必须和 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 一起使用。
+- Pass 在该路径中保留原始同步 `cholesky` ABI 调用，不再把 `cholesky` 提交为 DAG task；每个 `cholesky` 前插入通用 `compiler2026_runtime_wait_key(diagonal_input_key)`。
+- `trsm` 和 `madd` 仍使用跨 panel dependency submit，`madd` 保持三输入依赖和 output key，用于表达自身输出块 previous producer。
+- runtime 新增通用 `waitForKey` / `compiler2026_runtime_wait_key`，只等待整数 key 的 latest producer，等待期间主线程会执行 ready task；该函数标记为 cold/noinline，默认 panel-local IR 不声明也不调用 `wait_key`。
+- `compiler2026_task_cholesky` 改为按需创建，只有旧的 taskized cross-panel 实验路径需要时才生成；sync-cholesky 路径中 IR 不再包含 cholesky task 引用。
+
+经验：
+
+- 该路径把跨 panel 实验的 live DAG 压力进一步压低：`cross_panel_sync_cholesky_profile_final_smoke.csv` 中 `max_dag_live=1066`，低于 taskized cross-panel + live-window 的约 `2050`。
+- 这仍没有超过默认 panel-local 路径：sync-cholesky profile smoke 的 `speedup_geo=1.534x`、`contestant_total=0.660494s`，明显低于当前默认正式记录。因此它保留为 opt-in 实验，不切默认。
+- 默认路径 guard repeat=3 为 `contestant_total=1.778253s`、`speedup_geo=1.641x`，低于当前最佳正式记录 `live_window_default_repeat3_final` 的 `contestant_total=1.769841s`、`speedup_geo=1.657x`；当前最佳配置不变。
+- 这轮结果说明减少 cholesky task 化和 live 节点数量有帮助，但主要瓶颈仍在跨 panel 依赖维护、单全局 ready queue 和关键路径调度，而不是 cholesky task 本身。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.630x`；默认 IR 检查为 `wait_key_refs=0`、`cholesky_task_refs=0`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过；实验 IR 检查为 `wait_key=1`、`cholesky_task_refs=0`、`submit_deps3=1`。
+- `LABEL=sync_cholesky_default_guard_repeat3_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/sync_cholesky_default_guard_repeat3_final.csv`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_sync_cholesky_profile_final_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_sync_cholesky_profile_final_smoke.csv`。
+- `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。
