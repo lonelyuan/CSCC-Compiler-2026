@@ -305,6 +305,7 @@ void compiler2026_runtime_end();
 - queue/DAG reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - 减少大量任务提交时的重复唤醒。
 - 对小/中等 `b` 使用小批量提交和批量出队，降低细粒度 `madd` 任务的锁开销；当前默认批量上限为 `8`，并会根据 block 数和线程数收窄，避免小 panel 下过度批量影响负载均衡。
+- `COMPILER2026_DAG_MAX_LIVE` 提供默认关闭的 live-window drain：跨 panel 实验中如果 live DAG 超过窗口且已有 ready task，提交线程会先执行一小批 ready task，降低完整 DAG 的 live pressure。
 - 可选输出 task 数、队列等待、执行时间、worker idle、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程 wait 空等、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/释放批量/live 等 profile 指标。
 - 对 panel 内 `trsm -> madd` 依赖使用 ready queue，避免 `trsm` 阶段全局 wait。
 
@@ -486,7 +487,7 @@ writes block(row, col)
 
 这样可以利用 profile 基础设施，又避免自动调优本身吞掉计时预算或对单次 judge 输入过拟合。
 
-当前已有一版 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 跨 panel 实验路径：Pass 会把 `cholesky` 也 taskize，并用三依赖 submit 表达 `madd` 的两个 `trsm` 输入和自身输出块 previous producer。它证明了现有 IR 坐标恢复、runtime DAG 和 profile 链路已经能承载大方向优化，但 4 vCPU VM profile 显示 live DAG 和队列开销过大，暂时不应默认启用。下一步应减少 live window 或改队列结构，而不是继续增加 profile 字段。
+当前已有一版 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 跨 panel 实验路径：Pass 会把 `cholesky` 也 taskize，并用三依赖 submit 表达 `madd` 的两个 `trsm` 输入和自身输出块 previous producer。它证明了现有 IR 坐标恢复、runtime DAG 和 profile 链路已经能承载大方向优化。`COMPILER2026_DAG_MAX_LIVE=2048` 能把 profile 中的 live DAG 压到窗口附近，但 4 vCPU VM 上仍未超过默认 panel-local 路径。下一步应改队列结构、做关键块优先或更细的跨 panel 构图策略，而不是继续增加 profile 字段。
 
 ## 8. 可以调研的方向
 

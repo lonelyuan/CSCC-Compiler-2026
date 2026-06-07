@@ -903,3 +903,29 @@
 - `LABEL=benchmark_percentile_summary_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/benchmark_percentile_summary_smoke.csv`；overall summary 输出 `speedup_p50=1.707x`、`speedup_p95=1.879x`。
 - `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 cached profiling flag 实验前通过 verifier，speedup `1.626x`。
 - `LABEL=release_profile_flag_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过但性能未达保留标准，改动已回退。
+
+## 2026-06-08 cross-panel live-window drain
+
+改动：
+
+- runtime 新增 `COMPILER2026_DAG_MAX_LIVE`，默认 `0`。非零时，`submitWithDeps` 在 live DAG 超过窗口且 ready queue 非空时，由提交线程执行一小批 ready task 后继续提交。
+- 该机制不理解 `cholesky/trsm/madd` 语义，只使用通用 DAG 节点、ready queue 和依赖释放逻辑；默认 panel-local 路径不设置该变量，因此不改变默认调度语义。
+- `smoke_test.sh`、`benchmark.sh` 和 `tune_params.sh` 透传 `COMPILER2026_DAG_MAX_LIVE`，便于在目标平台上离线 sweep。
+- 同步设计、性能、路线图和 README，归档默认 repeat=3、cross-panel window 候选和 profile CSV。
+
+经验：
+
+- live-window drain 能实质压低跨 panel DAG 的 live pressure：`COMPILER2026_DAG_MAX_LIVE=2048` 的 profile 中 `max_dag_live=2050`，低于早先完整跨 panel DAG 的 `6072`。
+- 这还没有解决 4 vCPU VM 上的核心瓶颈。`2048` final smoke 的 `contestant_total=0.611483s`、`speedup_geo=1.598x`，profile smoke 的 `contestant_total=0.658224s`、`speedup_geo=1.550x`，均低于默认 panel-local repeat=3。
+- 当前默认正式结果更新为 `live_window_default_repeat3_final`，仍是 panel-local 路径：`contestant_total=1.769841s`、`speedup_geo=1.657x`，IR 计数保持 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`。
+- 后续大方向应继续做 per-worker queue/work stealing、关键块优先或跨 panel 依赖的 live-window 构图策略；只靠提交端 drain 不足以让完整跨 panel DAG 默认化。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.616x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.615x`。
+- `LABEL=live_window_default_repeat3_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/live_window_default_repeat3_final.csv`；summary 为 `runs=12 serial_total=2.982439s contestant_total=1.769841s speedup_avg=1.674x speedup_geo=1.657x speedup_p50=1.712x speedup_p95=1.934x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=<512|1024|2048|4096> LABEL=cross_panel_live*_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，候选 CSV 已归档；最佳候选未超过默认 repeat=3，因此未切默认。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=cross_panel_live2048_profile_final_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/cross_panel_live2048_profile_final_smoke.csv`；profile 包含 `max_dag_live=2050`、`max_wait_dag_live=2046`、`dag_missing_deps=7595`。

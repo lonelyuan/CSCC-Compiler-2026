@@ -29,7 +29,7 @@ Run benchmark suites and write CSV results:
 ```bash
 source /etc/profile.d/bisheng.sh
 cd /root/bisheng
-LABEL=successor_edge_pool_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
+LABEL=live_window_default_repeat3_final REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
 The current default auto batch uses an upper bound of `8` for `b <= 64`;
@@ -108,6 +108,12 @@ replaces the static panel-end wait with one outer DAG drain wait. It currently
 passes local verifier smoke but is slower than the default panel-local DAG on
 the 4-vCPU VM, so it is opt-in.
 
+For the same experimental path, `COMPILER2026_DAG_MAX_LIVE=<N>` enables a
+generic submit-side live-window drain. When live DAG pressure exceeds the
+window and ready tasks exist, the submitting thread runs a small ready batch
+before continuing. The default is `0`, so the current panel-local path is not
+changed unless the variable is set.
+
 Package artifacts:
 
 ```bash
@@ -145,6 +151,9 @@ Current implementation:
   lowering where Pass-generated `cholesky`, `trsm`, and `madd` task functions
   directly call the official ABI operators. The default remains panel-local
   because current VM evidence shows lower overhead and better geomean speedup.
+- `COMPILER2026_DAG_MAX_LIVE` is an opt-in live-window control for that
+  experimental path; it is intended for target-platform tuning, not as a new
+  default.
 - `scripts/tune_params.sh` provides an offline wrapper around `benchmark.sh` for
   environment-specific threshold/batch/thread sweeps. Runtime defaults remain
   deterministic and cheap during contestant execution.

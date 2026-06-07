@@ -101,8 +101,10 @@ public:
     }
 
     void resetForCall(std::size_t reserve_tasks = 0, std::size_t task_batch_size = 1,
-                      int n = 0, int b = 0, std::size_t total_threads = 1) {
+                      int n = 0, int b = 0, std::size_t total_threads = 1,
+                      std::size_t max_live_window = 0) {
         wait();
+        max_live_window_ = max_live_window;
         resetProfile(n, b, total_threads, task_batch_size);
         resetQueue(reserve_tasks, task_batch_size);
     }
@@ -269,6 +271,9 @@ public:
 
         if (should_notify) {
             work_cv_.notify_one();
+        }
+        if (max_live_window_ != 0) {
+            drainReadyTasksForLiveWindow();
         }
     }
 
@@ -488,6 +493,42 @@ private:
         successor_edges_.clear();
         latest_producer_.clear();
         pending_dag_tasks_ = 0;
+    }
+
+    void drainReadyTasksForLiveWindow() {
+        if (max_live_window_ == 0 || workers_.empty()) {
+            return;
+        }
+
+        while (true) {
+            std::array<Task, kMaxTaskBatch> batch{};
+            std::size_t batch_count = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (pending_dag_tasks_ <= max_live_window_ || task_head_ >= tasks_.size()) {
+                    return;
+                }
+                batch_count = takeReadyTasksLocked(batch.data());
+            }
+
+            BatchProfile profile =
+                runBatch(batch.data(), batch_count,
+                         profile_enabled_.load(std::memory_order_relaxed));
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_tasks_ -= batch_count;
+                const std::size_t released = completeDagTasksLocked(batch.data(), batch_count);
+                recordBatchProfileLocked(batch.data(), batch_count, profile, false);
+                recordDagReleaseBatchLocked(released);
+                if (released > 0) {
+                    work_cv_.notify_all();
+                }
+                if (tasks_.empty() && active_tasks_ == 0) {
+                    done_cv_.notify_all();
+                }
+            }
+        }
     }
 
     std::size_t chooseBatchCount(std::size_t available) const {
@@ -715,6 +756,7 @@ private:
     std::size_t task_head_ = 0;
     std::size_t pending_count_ = 0;
     std::size_t task_batch_size_ = 1;
+    std::size_t max_live_window_ = 0;
     std::mutex mutex_;
     std::condition_variable work_cv_;
     std::condition_variable done_cv_;
@@ -869,6 +911,17 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
     return batch;
 }
 
+std::size_t dagMaxLiveWindow() {
+    if (const char *env = std::getenv("COMPILER2026_DAG_MAX_LIVE")) {
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0') {
+            return static_cast<std::size_t>(configured);
+        }
+    }
+    return 0;
+}
+
 AsyncRuntime &activeRuntime() {
     if (!runtime) {
         runtime = std::make_unique<AsyncRuntime>(std::thread::hardware_concurrency());
@@ -883,12 +936,15 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
     const std::size_t worker_threads = (total_threads > 1) ? (total_threads - 1) : 0;
     const std::size_t reserve_tasks = reserveTaskCount(n, b);
     const std::size_t task_batch_size = selectTaskBatchSize(n, b, worker_threads);
+    const std::size_t max_live_window = dagMaxLiveWindow();
     if (!runtime || runtime->workerCount() != worker_threads) {
         runtime = std::make_unique<AsyncRuntime>(worker_threads);
-        runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads);
+        runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads,
+                              max_live_window);
         return;
     }
-    runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads);
+    runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads,
+                          max_live_window);
 }
 
 extern "C" int compiler2026_runtime_should_async(int n, int b) {
