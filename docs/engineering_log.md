@@ -630,3 +630,32 @@
 - 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
 - 本轮 summary 包含 `ir: submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`，overall summary 为 `runs=4 serial_total=0.956868s contestant_total=0.647151s speedup_avg=1.509x speedup_geo=1.485x`，async decision summary 为 `enabled=19 disabled=20 small_b=20 threads=0 single_block=0`，profile summary 包含 `tasks_avg=6999.2`、`runtime_batch_max=16`、`ready_avg_avg=82.514`、`ready_per_thread_avg=20.629`、`dag_edges_avg=4987.0`、`dag_satisfied_deps_avg=6973.0`、`dag_missing_deps=0`、`dag_release_batches_avg=301.5`、`max_dag_release_batch=147`、`max_dag_live=487`、`wait_dag_live_avg=90.232`、`max_wait_dag_live=484`。
 - `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。
+
+## 2026-06-07 async min block-count gate
+
+改动：
+
+- runtime predicate 新增 `COMPILER2026_ASYNC_MIN_BLOCKS`，默认值为 `2`，因此默认行为保持和上一轮一致。
+- async decision profile 新增 `min_blocks` 输出，并新增禁用原因 `small_blocks`。
+- benchmark 现在透传 `COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 给 contestant；CSV 新增 `async_min_blocks` 和 `async_disabled_small_blocks` 字段，summary 输出 `small_blocks`。
+- smoke 也透传 `COMPILER2026_ASYNC_MIN_BLOCKS`，可用小范围 verifier 直接验证该 gate。
+
+经验：
+
+- 之前 benchmark 记录了 `task_batch` / `async_min_b`，但没有把这两个环境变量传给 contestant，容易让调参 CSV 变成“元数据正确、执行路径错误”。本轮一并修正 benchmark 透传。
+- 默认 `min_blocks=2` 下 profile benchmark 决策分布仍为 `enabled=19 disabled=20 small_b=20 small_blocks=0 threads=0 single_block=0`，说明默认路径未改变。
+- `COMPILER2026_ASYNC_MIN_BLOCKS=5` 时 profile benchmark 输出 `enabled=14 disabled=25 small_b=20 small_blocks=5 threads=0 single_block=0`，证明新 gate 在 benchmark 中真实生效；该实验几何平均降到 `1.193x`，所以不把默认值提高到 5。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=80 SPEC_END=80 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 COMPILER2026_ASYNC_MIN_BLOCKS=5 ./submission/scripts/smoke_test.sh` verifier 通过，并输出 `min_blocks=5 enabled=0 reason=small_blocks`。
+- `SPEC_START=80 SPEC_END=80 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/smoke_test.sh` verifier 通过，并输出 `min_blocks=2 enabled=1 reason=enabled`。
+- `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过，speedup `1.833x`。
+- `LABEL=async_min_blocks_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/async_min_blocks_profile_smoke.csv`。
+- `LABEL=async_min_blocks5_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 COMPILER2026_ASYNC_MIN_BLOCKS=5 ./submission/scripts/benchmark.sh` 通过，归档为 `docs/benchmark_results/async_min_blocks5_profile_smoke.csv`。
+- 默认 summary 为 `runs=4 serial_total=1.076040s contestant_total=0.665944s speedup_avg=1.644x speedup_geo=1.589x`，`async_decisions: enabled=19 disabled=20 small_b=20 small_blocks=0 threads=0 single_block=0`。
+- `min_blocks=5` summary 为 `runs=4 serial_total=0.964741s contestant_total=0.761458s speedup_avg=1.222x speedup_geo=1.193x`，`async_decisions: enabled=14 disabled=25 small_b=20 small_blocks=5 threads=0 single_block=0`。
+- 优化后 IR 检查确认 `compiler2026_task_trsm` 直接调用 `@trsm`、`compiler2026_task_madd` 直接调用 `@madd`，async path 保持两个 `compiler2026_runtime_submit_deps` call site。
+- `./submission/scripts/package.sh` 通过，`submission.zip` 在 `/tmp/judge_zip_test` 解压后 CMake/Ninja 构建通过。

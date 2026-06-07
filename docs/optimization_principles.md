@@ -209,7 +209,7 @@ else
     run original serial IR path;
 ```
 
-这么做是因为任务调度有额外开销。默认 runtime predicate 使用 `b >= 32`、block 数大于 1 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_DAG_THREADS` 可以用于实验覆盖。
+这么做是因为任务调度有额外开销。默认 runtime predicate 使用 `b >= 32`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 和 `COMPILER2026_DAG_THREADS` 可以用于实验覆盖。
 
 ### 4.2 算子调用 outline
 

@@ -42,8 +42,9 @@ SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 
 
 `smoke_test.sh` passes `COMPILER2026_DAG_THREADS`,
 `COMPILER2026_DAG_PROFILE`, `COMPILER2026_TASK_BATCH`, and
-`COMPILER2026_ASYNC_MIN_B` through to the contestant binary, so small verifier
-runs can exercise the same runtime knobs as benchmarks.
+`COMPILER2026_ASYNC_MIN_B` / `COMPILER2026_ASYNC_MIN_BLOCKS` through to the
+contestant binary, so small verifier runs can exercise the same runtime knobs
+as benchmarks.
 
 When the same profile flag is used with `benchmark.sh`, parsed profile metrics
 are written into the benchmark CSV next to the timing fields:

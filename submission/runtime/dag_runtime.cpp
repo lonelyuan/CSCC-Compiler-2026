@@ -767,6 +767,18 @@ int asyncMinBlockSize() {
     return threshold;
 }
 
+int asyncMinBlockCount() {
+    int threshold = 2;
+    if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_BLOCKS")) {
+        char *end = nullptr;
+        const long configured = std::strtol(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            threshold = static_cast<int>(configured);
+        }
+    }
+    return threshold;
+}
+
 std::size_t reserveTaskCount(int n, int b) {
     if (n <= 0 || b <= 0) {
         return 0;
@@ -843,7 +855,8 @@ extern "C" void compiler2026_runtime_begin(int n, int b) {
 }
 
 extern "C" int compiler2026_runtime_should_async(int n, int b) {
-    const int threshold = asyncMinBlockSize();
+    const int min_b = asyncMinBlockSize();
+    const int min_blocks = asyncMinBlockCount();
     std::size_t total_threads = 1;
     int block_count = 0;
     bool enabled = false;
@@ -851,10 +864,12 @@ extern "C" int compiler2026_runtime_should_async(int n, int b) {
 
     if (n > 0 && b > 0) {
         block_count = n / b;
-        if (b < threshold) {
+        if (b < min_b) {
             reason = "small_b";
         } else if (block_count <= 1) {
             reason = "single_block";
+        } else if (block_count < min_blocks) {
+            reason = "small_blocks";
         } else {
             total_threads = resolveThreadCount(n, b);
             if (total_threads > 1) {
@@ -869,9 +884,9 @@ extern "C" int compiler2026_runtime_should_async(int n, int b) {
     if (profileEnabledFromEnv()) {
         std::fprintf(stderr,
                      "[compiler2026_async_decision] n=%d b=%d block_count=%d "
-                     "threshold=%d threads=%zu enabled=%d reason=%s\n",
-                     n, b, block_count, threshold, total_threads, enabled ? 1 : 0,
-                     reason);
+                     "threshold=%d min_blocks=%d threads=%zu enabled=%d reason=%s\n",
+                     n, b, block_count, min_b, min_blocks, total_threads,
+                     enabled ? 1 : 0, reason);
     }
 
     return enabled ? 1 : 0;
