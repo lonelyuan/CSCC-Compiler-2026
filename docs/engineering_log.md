@@ -837,3 +837,28 @@
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.597x`。
 - `LABEL=successor_edge_pool_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/successor_edge_pool_repeat3.csv`；summary 为 `runs=12 serial_total=2.973509s contestant_total=1.780286s speedup_avg=1.663x speedup_geo=1.645x`，IR 计数仍为 `submit_deps=2 submit_plain=0 wait_calls=1 trsm_calls=2 madd_calls=2`。
 - `LABEL=successor_edge_pool_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/successor_edge_pool_profile_smoke.csv`；summary 为 `speedup_geo=1.523x`，async decision 为 `enabled=24 disabled=15 small_b=15 small_blocks=0 threads_disabled=0 single_block=0`，profile 包含 `runtime_batch_max=8`、`dag_missing_deps=0`、`max_dag_successors=46`、`max_dag_live=635`。
+
+## 2026-06-08 technical scheme notes and rejected producer-table experiments
+
+改动：
+
+- 新增 `docs/technical_scheme_notes.md`，把官方技术方案 PDF 中和工程实现直接相关的规则、评分、平台、提交物和分块 Cholesky 依赖关系拆成可检索文本。
+- `skills/compiler-contest-assistant/SKILL.md` 引用该笔记，并把不修改官方算子、保持 runtime 通用、优先跨 panel 依赖恢复等约束加入项目工作指引。
+- 未保留 runtime producer-table 改动：试过把 latest-producer 改为 dense vector，也试过只按当前 panel producer 数预留 unordered_map bucket。
+
+经验：
+
+- official notes 应作为后续路线判断的规则来源，特别是“LLVM Pass 分析依赖 + runtime 调度”与“不可替换官方算子”的边界。
+- dense vector producer table 在当前默认 panel-local DAG 上没有收益：它避免了哈希查找，但引入 touched-key 清理和额外状态维护；两组 repeat=3 的 contestant total 分别为 `1.795982s` 和 `1.798338s`，都差于上一轮 `successor_edge_pool_repeat3` 的 `1.780286s`。
+- 缩小 unordered_map reserve 到当前 panel producer 数也没有收益，`producer_reserve_repeat3` contestant total 为 `1.798080s`。当前较大的 bucket reserve 虽然占用更多桶，但降低了依赖查找路径的负载因子。
+- VM 根分区会被 benchmark 工作目录撑满；本轮 `build/optimization_benchmarks` 达到 `54G` 导致 baseline 写结果失败。清理该生成目录后 benchmark 恢复正常。后续长时间 sweep 前应确认磁盘空间，CSV 归档到 `docs/benchmark_results/` 后可以清理 VM benchmark 工作目录。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 dense producer table 实验下 verifier 通过，speedup `1.622x`，但正式 repeat=3 未形成 contestant time 收益，改动已回退。
+- `LABEL=dense_producer_table_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，summary 为 `contestant_total=1.795982s speedup_geo=1.709x`；高 geomean 主要来自 serial time 波动，不作为保留依据。
+- `LABEL=dense_producer_table_repeat3_b REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，summary 为 `contestant_total=1.798338s speedup_geo=1.623x`。
+- `LABEL=producer_reserve_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 清理空间后通过，summary 为 `contestant_total=1.798080s speedup_geo=1.658x`，改动已回退。
+- `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 包含 `docs/technical_scheme_notes.md`，并在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过。

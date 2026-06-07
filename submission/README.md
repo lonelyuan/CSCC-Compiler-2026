@@ -155,3 +155,5 @@ Documentation:
 - `roadmap.md`: longer-term scaling notes.
 - `engineering_log.md`: verified lessons and constraints from each
   optimization step.
+- `technical_scheme_notes.md`: extracted contest-rule notes from the official
+  technical scheme PDF.

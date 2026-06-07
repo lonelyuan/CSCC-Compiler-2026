@@ -58,6 +58,33 @@ Follow these rules strictly:
 - Do not hack SDK tools, public cases, timing, verifier, generator, file I/O, or result output.
 - Do not claim performance results without a reproducible CSV, command, and correctness verifier pass.
 
+## Official Technical Scheme Notes
+
+The official PDF in `docs/2026年全国大学生计算机系统能力大赛编译系统设计赛-编译系统挑战赛-动态算子图编译与并行调度-技术方案.pdf` is summarized in `docs/technical_scheme_notes.md`. Use it as the contest-rule source before making strategic changes.
+
+- The task is explicitly "dynamic operator graph compilation and parallel scheduling": analyze operator dependencies in LLVM, generate an executable, preserve numerical correctness, and maximize parallel performance.
+- The target workload is blocked Cholesky. The official operators are `cholesky`, `trsm`, and `madd`; the intended optimization is dependency-aware parallel execution of these operators.
+- Source annotations are allowed only as analysis aids and must be documented. The current project does not depend on annotations.
+- Runtime support is allowed, but its API and semantics must be documented. It should remain generic scheduling infrastructure.
+- Performance timing is for the core computation only, after correctness filtering; file I/O and verification are excluded by the judge.
+- Functional pass rate has a 90% gate. Below the gate, performance score is not counted. Full correctness is strategically mandatory.
+- Performance score is based on geometric mean speedup, normalized by an ideal factor such as `m_ideal=128`: roughly `performance_score = 100 * geo_speedup / m_ideal`. A `2x` geomean speedup therefore yields only about `1.56` performance points when `m_ideal=128`.
+- Initial scoring weights are 40% functional pass rate and 60% performance score. With full correctness and `m_ideal=128`, total score is roughly `40 + 0.6 * (100 * geo_speedup / 128)`.
+- Finals add 50 hidden matrix cases and include non-code scoring: objective score 30%, design document 20%, teamwork/defense 50%. Keep design docs, benchmark evidence, bottlenecks, and comparisons current.
+- Test matrices use double matrices, widths `n` from 3 to 10000, row-major binary input/output, and per-matrix block size `b`.
+
+Official blocked Cholesky dependencies to preserve and exploit:
+
+```text
+cholesky(panel) produces the current diagonal block
+trsm(row, panel) depends on cholesky(panel)
+madd(row, col, panel) depends on trsm(row, panel) and trsm(col, panel)
+cholesky(panel + 1) only needs updates to block (panel + 1, panel + 1), not every trailing update
+trsm(row, panel + 1) only needs updates to block (row, panel + 1)
+```
+
+Strategic implication: after the current panel-local DAG, the largest rule-compliant performance space is cross-panel dependency recovery and scheduling, not more profiling counters or source/operator rewrites.
+
 ## Engineering Posture
 
 Prioritize compiler credibility:
