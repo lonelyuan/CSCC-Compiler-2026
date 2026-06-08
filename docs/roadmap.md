@@ -114,7 +114,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 - Panel 末尾 barrier 仍过保守，限制大核数可扩展性。
 - Pass 已有一版基于一维 `GEPOperator` offset 的 block row/col 恢复，并支持递归累加嵌套一维 GEP offset；runtime 仍接收由 row/col 组合出的线性 key，还不是通用数组子块坐标和读写集合分析。
 - Runtime 仍以单全局队列为核心，虽然已有批量提交/出队和连续 successor edge pool 缓解，扩展到 32 核以上仍可能出现锁竞争。
-- 跨 panel DAG 已有 opt-in 实验路径，profile 已能把 first-touch 输入依赖和 missing producer 总数同时记录；后续重点转向 live DAG 内存/锁开销、关键路径优先级和队列扩展性，不能只靠移除 panel wait 直接默认启用。
+- 跨 panel DAG 已有 opt-in 实验路径，profile 已能把 first-touch 输入依赖和 missing producer 总数同时记录；直接删除 completed latest producer 会把大量 satisfied producer 改写成 missing producer 且性能退化，后续重点应转向 live DAG 内存/锁开销、关键路径优先级和队列扩展性，不能只靠移除 panel wait 或擦除 producer 表直接默认启用。
 - live-window drain 和 sync-cholesky key wait 能缓解跨 panel DAG 的 live/task 化压力，但没有解决单全局队列、依赖维护和关键路径优先级问题。
 - 阈值仍来自经验测试；async 入口已由 runtime predicate 按 block size、最小 block count 和 thread count 控制，默认 task batch 已开始参考 block count/thread count，runtime 和 benchmark 已能记录 profile，`tune_params.sh` 已能生成离线 aggregate CSV，但尚未形成跨运行的自动 profile-guided heuristic。
 

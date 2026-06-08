@@ -1127,3 +1127,22 @@
 - `LABEL=key_wait_notify_default_guard_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/key_wait_notify_default_guard_repeat3.csv`。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 LABEL=key_wait_notify_sync_cholesky_live2048_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/key_wait_notify_sync_cholesky_live2048_repeat3.csv`。
 - `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。
+
+## 2026-06-08 rejected completed-producer table shrink
+
+尝试：
+
+- runtime DAG node 临时记录 output key。
+- 当 task 完成且它仍是某个 key 的 latest producer 时，从 `latest_producer_` 删除该 key。
+- 目标是让跨 panel DAG 的 producer 表只保留仍未完成的 producer，减少 completed-producer 查询和 hash table 压力。
+
+结果：
+
+- `COMPILER2026_DAG_DROP_COMPLETED_PRODUCERS=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.619x`。
+- `COMPILER2026_DAG_DROP_COMPLETED_PRODUCERS=1 COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，但 speedup 降到 `1.394x`。
+- `COMPILER2026_DAG_DROP_COMPLETED_PRODUCERS=1 COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_PROFILE=1 LABEL=drop_completed_producers_profile_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/drop_completed_producers_profile_smoke.csv`；summary 为 `contestant_total=0.728694s speedup_geo=1.363x dag_missing_deps=243986 dag_first_touch_deps=8012 max_dag_live=893`。
+
+结论：
+
+- 删除 completed latest producer 虽然降低了 `max_dag_live`，但大量后续依赖会从 satisfied completed producer 变成 missing producer，破坏当前 profile 语义，也没有带来性能收益。
+- 代码改动已回退，只保留 CSV 和日志。后续如果要缩 producer 表，应单独维护 completed-producer cache 或 profile 语义，而不是直接 erase latest producer。

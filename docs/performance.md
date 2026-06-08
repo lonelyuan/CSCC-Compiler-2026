@@ -198,6 +198,7 @@ docs/benchmark_results/key_wait_notify_default_guard_repeat3.csv
 docs/benchmark_results/key_wait_notify_sync_cholesky_live2048_repeat3.csv
 docs/benchmark_results/cross_panel_reserve_profile_smoke.csv
 docs/benchmark_results/cross_panel_sync_cholesky_reserve_profile_smoke.csv
+docs/benchmark_results/drop_completed_producers_profile_smoke.csv
 docs/benchmark_results/pin_workers_schema_default_repeat3.csv
 docs/benchmark_results/pin_workers_repeat3.csv
 docs/benchmark_results/pin_workers_profile_smoke.csv
@@ -213,6 +214,7 @@ docs/benchmark_results/cross_panel_fanout_priority_profile_smoke.csv
 `dag_first_touch_cross_panel_profile_smoke.csv` 证明跨 panel 路径中 `dag_missing_deps=7595` 全部对应 `dag_first_touch_deps=7595`，即原始输入块 first-touch，而不是同一 DAG 内已知 output producer 丢失。
 `cross_panel_sync_cholesky_profile_final_smoke.csv` 验证 sync-cholesky cross-panel 实验路径可用：默认 IR guard 中 `wait_key_refs=0`，实验 IR 中 `wait_key=1`、`cholesky_task_refs=0`、`submit_deps3=1`；profile 中 `max_dag_live=1066`，低于 live-window taskized cross-panel 的约 `2050`，但 `speedup_geo=1.534x`、`contestant_total=0.660494s`，仍低于默认 panel-local 正式结果。`cross_panel_sync_cholesky_live2048_repeat3.csv` 是该路径在 `COMPILER2026_DAG_MAX_LIVE=2048` 下的 repeat=3 正式复测，`speedup_geo=1.587x`、`contestant_total=1.828356s`，仍未超过当前默认 `live_window_default_repeat3_final`，因此不切默认。`key_wait_notify_sync_cholesky_live2048_repeat3.csv` 是 `runtime_wait_key` 改为完成通知后的同配置 repeat=3 结果，`speedup_geo=1.606x`、`contestant_total=1.796239s`，较上一轮 sync-cholesky live-window 复测有改善，但仍未超过默认；`key_wait_notify_default_guard_repeat3.csv` 是默认路径 guard，`contestant_total=1.753659s` 但 `speedup_geo=1.616x`，不替代当前最佳 geomean 记录。
 `cross_panel_reserve_profile_smoke.csv` 和 `cross_panel_sync_cholesky_reserve_profile_smoke.csv` 记录了一次已回退的 cross-panel aware reserve sizing 实验：taskized cross-panel 为 `speedup_geo=1.503x`、`contestant_total=0.663732s`，sync-cholesky 为 `speedup_geo=1.532x`、`contestant_total=0.662763s`，均未超过对应旧实验记录，因此没有保留代码改动。
+`drop_completed_producers_profile_smoke.csv` 记录了一次已回退的 latest-producer 表收缩实验：producer 完成后如果仍是 latest producer 就从 `latest_producer_` 删除。该策略在 sync-cholesky live-window 路径下得到 `speedup_geo=1.363x`、`contestant_total=0.728694s`，显著低于保留 producer 表的同类实验；同时 `dag_missing_deps=243986`、`dag_first_touch_deps=8012`，说明大量 completed-producer 命中会被改写成 missing producer，破坏当前 profile 诊断语义，因此没有保留代码改动。
 `cross_panel_fanout_priority_profile_smoke.csv` 记录了一次已回退的 ready dequeue fanout-priority 实验：该策略只按 runtime 通用 successor fanout 在小窗口内重排 ready task，不读取算子名称；在 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048` 下得到 `speedup_geo=1.452x`、`contestant_total=0.695125s`，低于既有 cross-panel live-window 结果，因此没有保留代码改动。
 
 ## 结论
