@@ -65,7 +65,7 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 已有第一版跨 panel DAG 实验入口：设置 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 时，Pass 会 taskize `cholesky`，让 `trsm` 依赖 diagonal/latest output producer，让 `madd` 通过 `runtime_submit_deps3` 依赖两个 `trsm` 和自身输出块 previous producer，并把静态 panel wait 降到外层分解循环结束。该路径证明当前框架可以表达跨 panel 依赖，但在 4 vCPU VM 上 `max_dag_live`、依赖边数和 queue 时间显著上升，暂不作为默认。`COMPILER2026_DAG_MAX_LIVE` 已提供一版默认关闭的 live-window drain，可把跨 panel profile 中的 `max_dag_live` 压到窗口附近；当前跨 panel 实验仍未超过默认 panel-local 结果，后续应继续做 per-worker queue/work stealing 或更精确的 critical-path priority，而不是直接默认启用完整跨 panel DAG。
 
-新的受控跨 panel 方向是 `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1`：不把 `cholesky` 放入 task DAG，而是在原始同步调用前用 `runtime_wait_key` 只等待 diagonal input 的 latest producer。它保留跨 panel `trsm/madd` 依赖表达，但减少 cholesky task 和 context 开销；`COMPILER2026_DAG_MAX_LIVE=2048` repeat=3 仍未超过默认，因此继续作为 opt-in 实验和后续调度结构的验证入口。
+新的受控跨 panel 方向是 `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1`：不把 `cholesky` 放入 task DAG，而是在原始同步调用前用 `runtime_wait_key` 只等待 diagonal input 的 latest producer。它保留跨 panel `trsm/madd` 依赖表达，但减少 cholesky task 和 context 开销；`runtime_wait_key` 已从超时轮询改为存在 key waiter 时由完成方通知，`COMPILER2026_DAG_MAX_LIVE=2048` repeat=3 有小幅改善但仍未超过默认，因此继续作为 opt-in 实验和后续调度结构的验证入口。
 
 ### 3. 运行时任务粒度自适应
 

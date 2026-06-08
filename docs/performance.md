@@ -49,6 +49,7 @@ VM 原始输出：
 - 新增 opt-in 跨 panel DAG 实验路径：`COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 时，Pass 会 taskize `cholesky`，使用三依赖 submit 表达 `madd` 的两个 `trsm` 输入和自身输出块 previous producer，并把静态 panel wait 降为外层分解循环结束前的 wait。该路径暂不默认启用。
 - 新增 opt-in live-window drain：`COMPILER2026_DAG_MAX_LIVE=<N>` 非零时，DAG submit 会在 live DAG 超过窗口且已有 ready task 时由提交线程执行一小批 ready task，用于跨 panel DAG 实验降低完整图 live pressure；默认值为 `0`，panel-local 默认路径不启用。
 - 新增 opt-in sync-cholesky cross-panel lowering：`COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` 时，Pass 保留原始同步 `cholesky` 调用，只在调用前插入 `runtime_wait_key` 等待 diagonal input 的 latest producer；`trsm/madd` 仍进入跨 panel DAG。该路径用于降低 cholesky task 化和完整跨 panel DAG live pressure，仍需 benchmark 证明后才可默认化。
+- `runtime_wait_key` 从固定 `10us` 超时轮询改为基于完成通知等待：存在 key waiter 时，ready batch 完成方会通知 `done_cv`，让 sync-cholesky 实验路径更快发现目标 key producer 已完成；默认 panel-local 路径没有 key waiter。
 - 新增 opt-in Linux worker pinning：`COMPILER2026_DAG_PIN_WORKERS=1` 时，runtime 会把 worker 绑定到当前进程 affinity mask 中的 CPU，用于真实目标机亲和性实验；默认关闭。
 
 `b >= 16` 也做过实验，但在公开 benchmark 中触发段错误，已回退，不作为可交付配置。
@@ -193,6 +194,8 @@ docs/benchmark_results/dag_first_touch_cross_panel_profile_smoke.csv
 docs/benchmark_results/sync_cholesky_default_guard_repeat3_final.csv
 docs/benchmark_results/cross_panel_sync_cholesky_profile_final_smoke.csv
 docs/benchmark_results/cross_panel_sync_cholesky_live2048_repeat3.csv
+docs/benchmark_results/key_wait_notify_default_guard_repeat3.csv
+docs/benchmark_results/key_wait_notify_sync_cholesky_live2048_repeat3.csv
 docs/benchmark_results/cross_panel_reserve_profile_smoke.csv
 docs/benchmark_results/cross_panel_sync_cholesky_reserve_profile_smoke.csv
 docs/benchmark_results/pin_workers_schema_default_repeat3.csv
@@ -208,7 +211,7 @@ docs/benchmark_results/cross_panel_fanout_priority_profile_smoke.csv
 `benchmark_percentile_summary_smoke.csv` 是 terminal percentile summary 的单次 smoke 记录，用于证明 suite/overall summary 输出 `speedup_p50` 和 `speedup_p95` 可用；该 CSV 不新增字段，不作为正式性能均值。
 `cross_panel_live512_smoke.csv`、`cross_panel_live1024_smoke.csv`、`cross_panel_live2048_smoke.csv` 和 `cross_panel_live4096_smoke.csv` 是 live-window 候选扫参记录；最佳单次 smoke 未超过当前默认 repeat=3，因此不切默认。`cross_panel_live2048_profile_final_smoke.csv` 证明 `COMPILER2026_DAG_MAX_LIVE=2048` 下 `max_dag_live=2050`，但 `contestant_total=0.658224s`、`speedup_geo=1.550x` 仍不足以默认启用。
 `dag_first_touch_cross_panel_profile_smoke.csv` 证明跨 panel 路径中 `dag_missing_deps=7595` 全部对应 `dag_first_touch_deps=7595`，即原始输入块 first-touch，而不是同一 DAG 内已知 output producer 丢失。
-`cross_panel_sync_cholesky_profile_final_smoke.csv` 验证 sync-cholesky cross-panel 实验路径可用：默认 IR guard 中 `wait_key_refs=0`，实验 IR 中 `wait_key=1`、`cholesky_task_refs=0`、`submit_deps3=1`；profile 中 `max_dag_live=1066`，低于 live-window taskized cross-panel 的约 `2050`，但 `speedup_geo=1.534x`、`contestant_total=0.660494s`，仍低于默认 panel-local 正式结果。`cross_panel_sync_cholesky_live2048_repeat3.csv` 是该路径在 `COMPILER2026_DAG_MAX_LIVE=2048` 下的 repeat=3 正式复测，`speedup_geo=1.587x`、`contestant_total=1.828356s`，仍未超过当前默认 `live_window_default_repeat3_final`，因此不切默认。
+`cross_panel_sync_cholesky_profile_final_smoke.csv` 验证 sync-cholesky cross-panel 实验路径可用：默认 IR guard 中 `wait_key_refs=0`，实验 IR 中 `wait_key=1`、`cholesky_task_refs=0`、`submit_deps3=1`；profile 中 `max_dag_live=1066`，低于 live-window taskized cross-panel 的约 `2050`，但 `speedup_geo=1.534x`、`contestant_total=0.660494s`，仍低于默认 panel-local 正式结果。`cross_panel_sync_cholesky_live2048_repeat3.csv` 是该路径在 `COMPILER2026_DAG_MAX_LIVE=2048` 下的 repeat=3 正式复测，`speedup_geo=1.587x`、`contestant_total=1.828356s`，仍未超过当前默认 `live_window_default_repeat3_final`，因此不切默认。`key_wait_notify_sync_cholesky_live2048_repeat3.csv` 是 `runtime_wait_key` 改为完成通知后的同配置 repeat=3 结果，`speedup_geo=1.606x`、`contestant_total=1.796239s`，较上一轮 sync-cholesky live-window 复测有改善，但仍未超过默认；`key_wait_notify_default_guard_repeat3.csv` 是默认路径 guard，`contestant_total=1.753659s` 但 `speedup_geo=1.616x`，不替代当前最佳 geomean 记录。
 `cross_panel_reserve_profile_smoke.csv` 和 `cross_panel_sync_cholesky_reserve_profile_smoke.csv` 记录了一次已回退的 cross-panel aware reserve sizing 实验：taskized cross-panel 为 `speedup_geo=1.503x`、`contestant_total=0.663732s`，sync-cholesky 为 `speedup_geo=1.532x`、`contestant_total=0.662763s`，均未超过对应旧实验记录，因此没有保留代码改动。
 `cross_panel_fanout_priority_profile_smoke.csv` 记录了一次已回退的 ready dequeue fanout-priority 实验：该策略只按 runtime 通用 successor fanout 在小窗口内重排 ready task，不读取算子名称；在 `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_DAG_MAX_LIVE=2048` 下得到 `speedup_geo=1.452x`、`contestant_total=0.695125s`，低于既有 cross-panel live-window 结果，因此没有保留代码改动。
 

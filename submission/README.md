@@ -174,7 +174,8 @@ Current implementation:
 - `COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` changes that experimental lowering
   to keep `cholesky` synchronous and wait only for the needed dependency key
   before the call. The runtime interface is still generic and only sees integer
-  block keys.
+  block keys; key waiters sleep on completion notifications instead of polling
+  on a fixed timeout.
 - `COMPILER2026_DAG_MAX_LIVE` is an opt-in live-window control for that
   experimental path; it is intended for target-platform tuning, not as a new
   default.

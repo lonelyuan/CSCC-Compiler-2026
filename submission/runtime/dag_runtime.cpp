@@ -433,6 +433,7 @@ public:
             if (profiling) {
                 recordWaitEntryLocked();
             }
+            ++key_waiters_;
         }
 
         try {
@@ -457,7 +458,7 @@ public:
                             profile_enabled_.load(std::memory_order_relaxed);
                         const std::uint64_t wait_start_ns =
                             wait_profiling ? nowNs() : 0;
-                        done_cv_.wait_for(lock, std::chrono::microseconds(10));
+                        done_cv_.wait(lock);
                         if (wait_profiling) {
                             main_wait_ns_ += nowNs() - wait_start_ns;
                         }
@@ -484,12 +485,16 @@ public:
                     if (released > 0) {
                         work_cv_.notify_all();
                     }
-                    if (tasks_.empty() && active_tasks_ == 0) {
+                    if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
                         done_cv_.notify_all();
                     }
                 }
             }
         } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                --key_waiters_;
+            }
             recordWaitProfile(profiling, wait_enter_ns);
             throw;
         }
@@ -497,6 +502,7 @@ public:
         std::exception_ptr error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            --key_waiters_;
             if (worker_error_) {
                 error = worker_error_;
                 worker_error_ = nullptr;
@@ -555,7 +561,7 @@ private:
                 if (released > 0) {
                     work_cv_.notify_all();
                 }
-                if (tasks_.empty() && active_tasks_ == 0) {
+                if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
                     done_cv_.notify_all();
                 }
             }
@@ -675,7 +681,7 @@ private:
                 if (released > 0) {
                     work_cv_.notify_all();
                 }
-                if (tasks_.empty() && active_tasks_ == 0) {
+                if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
                     done_cv_.notify_all();
                 }
             }
@@ -919,6 +925,8 @@ private:
     std::size_t chunk_size_ = 0;
     std::size_t chunk_offset_ = 0;
     std::size_t active_tasks_ = 0;
+    // Only wait_key users need completion notifications before the whole DAG drains.
+    std::size_t key_waiters_ = 0;
     bool stopping_ = false;
     std::exception_ptr worker_error_;
     std::atomic<bool> profile_enabled_{false};

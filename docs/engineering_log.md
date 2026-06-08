@@ -1103,3 +1103,27 @@
 
 - sync-cholesky + live-window 确实比早期完整 cross-panel DAG 更受控，但 repeat=3 仍没有超过当前默认 `live_window_default_repeat3_final` 的 `contestant_total=1.769841s`、`speedup_geo=1.657x`。
 - 该路径继续保留为 opt-in 实验入口，不默认启用。后续跨 panel 方向应优先解决单全局队列、依赖维护和关键路径调度，而不是继续围绕 cholesky task 化本身调参。
+
+## 2026-06-08 wait-key completion notification
+
+改动：
+
+- `runtime_wait_key` 不再用 `done_cv.wait_for(10us)` 超时轮询等待 key producer 完成。
+- runtime 新增 `key_waiters_` 计数；只有存在 key waiter 时，worker 或提交线程完成 ready batch 后才额外通知 `done_cv`。
+- 默认 panel-local 路径不调用 `runtime_wait_key`，因此没有 key waiter；该改动主要服务 sync-cholesky cross-panel 实验路径。
+
+经验：
+
+- 目标实验路径有小幅改善：`key_wait_notify_sync_cholesky_live2048_repeat3.csv` 为 `contestant_total=1.796239s`、`speedup_geo=1.606x`，好于上一轮同配置 `cross_panel_sync_cholesky_live2048_repeat3.csv` 的 `contestant_total=1.828356s`、`speedup_geo=1.587x`。
+- 默认 guard 本轮为 `contestant_total=1.753659s`、`speedup_geo=1.616x`，不替代当前最佳正式记录。当前最佳仍是 `live_window_default_repeat3_final`。
+- wait-key 通知能降低实验路径的等待发现延迟，但不足以解决 cross-panel 的主要瓶颈；后续仍应转向单全局队列、依赖维护和更精确的关键路径调度。
+
+验证：
+
+- `bash -n submission/scripts/build.sh submission/scripts/smoke_test.sh submission/scripts/benchmark.sh submission/scripts/tune_params.sh submission/scripts/package.sh scripts/sync_to_vm.sh` 通过。
+- `git diff --check` 通过。
+- `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.627x`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` 在 VM 通过，verifier 通过，speedup `1.584x`。
+- `LABEL=key_wait_notify_default_guard_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/key_wait_notify_default_guard_repeat3.csv`。
+- `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 COMPILER2026_DAG_MAX_LIVE=2048 LABEL=key_wait_notify_sync_cholesky_live2048_repeat3 REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh` 在 VM 通过，归档为 `docs/benchmark_results/key_wait_notify_sync_cholesky_live2048_repeat3.csv`。
+- `./submission/scripts/package.sh` 在 VM 通过，`dist/submission.zip` 在 `/tmp/judge_zip_test` 解包后 CMake/Ninja 构建通过；zip 已同步回本地 `dist/submission.zip`。

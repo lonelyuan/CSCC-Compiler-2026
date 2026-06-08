@@ -150,7 +150,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `runtime_submit` 只接收 task function 指针和 context 指针。
 - `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。
 - `runtime_submit_deps3` 是三输入依赖版本，用于实验性的跨 panel DAG：`madd` 需要同时依赖两个 `trsm` 输入和自身输出块的 previous producer。
-- `runtime_wait_key` 是实验性跨 panel 路径使用的通用 key wait：给定一个整数 block key，runtime 等待当前 latest producer 完成，等待期间主线程也会执行 ready queue 中的任务。它不理解 key 对应哪个算子或矩阵块。
+- `runtime_wait_key` 是实验性跨 panel 路径使用的通用 key wait：给定一个整数 block key，runtime 等待当前 latest producer 完成，等待期间主线程也会执行 ready queue 中的任务。存在 key waiter 时，worker 或提交线程完成 ready batch 后会通知 `done_cv`，避免 key wait 依赖固定超时轮询发现 producer 完成。它不理解 key 对应哪个算子或矩阵块。
 - 当前 panel-local DAG 下，Pass 对 `trsm` submit 保留 output key，对 `madd` submit 使用 output key `-1`。原因是 panel 末尾仍有 wait，`madd` 输出在当前 DAG 作用域内没有后续 async consumer；这样可以减少 runtime 对无消费者 `madd` 节点的 `latest_producer_` 哈希表更新。后续做跨 panel DAG 时，需要重新把相关 `madd` 输出纳入依赖图。
 - worker 线程从队列中取任务，调用 Pass 生成的 task function。
 - `wait` 等待队列为空且所有运行中任务完成；主线程也会参与执行队列任务。
