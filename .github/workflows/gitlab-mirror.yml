@@ -1,0 +1,28 @@
+name: 希冀 Gitlab 镜像
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "${{ vars.GIT_EMAIL }}"
+          git config --global user.name "${{ vars.GIT_USERNAME }}"
+
+      - uses: yesolutions/mirror-action@master
+        with:
+          REMOTE: ${{ vars.GIT_REPO_URL }}
+          GIT_USERNAME: ${{ vars.GIT_USERNAME }}
+          GIT_PASSWORD: ${{ secrets.GIT_PASSWORD }}
+          PUSH_ALL_REFS: "false"
+          DEBUG: "true"
