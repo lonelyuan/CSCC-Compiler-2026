@@ -1,5 +1,7 @@
 # Bisheng Compiler Contest Project
 
+[![希冀 Gitlab 镜像](https://github.com/lonelyuan/CSCC-Compiler-2026/actions/workflows/gitlab-mirror.yml/badge.svg)](https://github.com/lonelyuan/CSCC-Compiler-2026/actions/workflows/gitlab-mirror.yml)
+
 本仓库是“动态算子图编译与并行调度”赛题的开发工程。项目目标是在 LLVM/BiSheng 编译器中增加 Pass，从官方分块 Cholesky baseline 的 IR 中识别 `cholesky`、`trsm`、`madd` 算子调用，分析可并行的算子依赖关系，并通过运行时任务调度提升多核执行性能。
 
 当前实现遵循编译器优化路线：不重写官方算法源码，不替换官方算子实现；Pass 在 IR 层克隆 async 版本、outline 算子任务函数、恢复 block key，并插入 runtime submit/wait 或 submit_deps 调用。官方 `trsm` 和 `madd` ABI 调用保留在 Pass 生成的 IR task function 内。
