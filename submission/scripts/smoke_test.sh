@@ -18,6 +18,9 @@ ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-18}"
 ASYNC_MIN_BLOCKS="${COMPILER2026_ASYNC_MIN_BLOCKS:-2}"
 DAG_MAX_LIVE="${COMPILER2026_DAG_MAX_LIVE:-0}"
 DAG_PIN_WORKERS="${COMPILER2026_DAG_PIN_WORKERS:-0}"
+DAG_CRITICAL_PRIORITY="${COMPILER2026_DAG_CRITICAL_PRIORITY:-0}"
+ANNOTATED_BLOCK_CHOLESKY="${SUBMISSION_DIR}/src/baseline/block_cholesky.cpp"
+ANNOTATED_MAIN="${SUBMISSION_DIR}/src/baseline/main.cpp"
 
 "${SUBMISSION_DIR}/scripts/build.sh"
 
@@ -41,11 +44,11 @@ cd "${SDK_DIR}"
   -o "${SMOKE_DIR}/bin/baseline_serial"
 
 "${CLANG_BIN}" -std=c++17 -O2 -Iinclude -Isrc/base_kernels \
-  -emit-llvm -c src/baseline/main.cpp \
+  -emit-llvm -c "${ANNOTATED_MAIN}" \
   -o "${SMOKE_DIR}/ir/main.bc"
 
 "${CLANG_BIN}" -std=c++17 -O2 -Iinclude -Isrc/base_kernels \
-  -emit-llvm -c src/baseline/block_cholesky.cpp \
+  -emit-llvm -c "${ANNOTATED_BLOCK_CHOLESKY}" \
   -o "${SMOKE_DIR}/ir/block_cholesky.bc"
 
 "${LLVM_LINK_BIN}" \
@@ -88,6 +91,7 @@ COMPILER2026_ASYNC_MIN_B="${ASYNC_MIN_B}" \
 COMPILER2026_ASYNC_MIN_BLOCKS="${ASYNC_MIN_BLOCKS}" \
 COMPILER2026_DAG_MAX_LIVE="${DAG_MAX_LIVE}" \
 COMPILER2026_DAG_PIN_WORKERS="${DAG_PIN_WORKERS}" \
+COMPILER2026_DAG_CRITICAL_PRIORITY="${DAG_CRITICAL_PRIORITY}" \
   "${SMOKE_DIR}/bin/contestant_app" \
   "${SMOKE_DIR}/input.bin" \
   "${SMOKE_DIR}/contestant.out"

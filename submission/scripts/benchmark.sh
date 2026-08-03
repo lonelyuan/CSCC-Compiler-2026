@@ -30,7 +30,12 @@ ASYNC_MIN_B="${COMPILER2026_ASYNC_MIN_B:-18}"
 ASYNC_MIN_BLOCKS="${COMPILER2026_ASYNC_MIN_BLOCKS:-2}"
 DAG_MAX_LIVE="${COMPILER2026_DAG_MAX_LIVE:-0}"
 DAG_PIN_WORKERS="${COMPILER2026_DAG_PIN_WORKERS:-0}"
+DAG_CRITICAL_PRIORITY="${COMPILER2026_DAG_CRITICAL_PRIORITY:-0}"
+PASS_CROSS_PANEL_DAG="${COMPILER2026_ENABLE_CROSS_PANEL_DAG:-0}"
+PASS_SYNC_CHOLESKY="${COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY:-0}"
 KEEP_ARTIFACTS="${COMPILER2026_BENCH_KEEP_ARTIFACTS:-0}"
+ANNOTATED_BLOCK_CHOLESKY="${SUBMISSION_DIR}/src/baseline/block_cholesky.cpp"
+ANNOTATED_MAIN="${SUBMISSION_DIR}/src/baseline/main.cpp"
 REPEAT="${REPEAT:-3}"
 LABEL="${LABEL:-run}"
 
@@ -56,11 +61,11 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/bin/baseline_serial"
 
 "${CLANG_BIN}" -std=c++17 -O2 -Iinclude -Isrc/base_kernels \
-  -emit-llvm -c src/baseline/main.cpp \
+  -emit-llvm -c "${ANNOTATED_MAIN}" \
   -o "${BENCH_DIR}/ir/main.bc"
 
 "${CLANG_BIN}" -std=c++17 -O2 -Iinclude -Isrc/base_kernels \
-  -emit-llvm -c src/baseline/block_cholesky.cpp \
+  -emit-llvm -c "${ANNOTATED_BLOCK_CHOLESKY}" \
   -o "${BENCH_DIR}/ir/block_cholesky.bc"
 
 "${LLVM_LINK_BIN}" \
@@ -75,7 +80,8 @@ cd "${SDK_DIR}"
   -o "${BENCH_DIR}/ir/app.opt.bc"
 
 "${LLVM_DIS_BIN}" "${BENCH_DIR}/ir/app.opt.bc" -o "${BENCH_DIR}/ir/app.opt.ll"
-IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps3?\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps3?(_priority)?\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
+IR_SUBMIT_PRIORITY=$(grep -Ec "call void @compiler2026_runtime_submit_deps3_priority\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_SUBMIT_PLAIN=$(grep -Ec "call void @compiler2026_runtime_submit\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_WAIT_CALLS=$(grep -Ec "call void @compiler2026_runtime_wait\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
 IR_TRSM_CALLS=$(grep -Ec "call .*@trsm\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
@@ -90,7 +96,7 @@ IR_MADD_CALLS=$(grep -Ec "call .*@madd\\(" "${BENCH_DIR}/ir/app.opt.ll" || true)
   -o "${BENCH_DIR}/bin/contestant_app"
 
 CSV="${BENCH_DIR}/${LABEL}.csv"
-echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,async_min_blocks,dag_max_live,dag_pin_workers,profile_enabled,ir_submit_deps,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_small_blocks,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,max_batch,max_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_first_touch_deps,dag_initial_ready,dag_released,dag_release_batches,max_dag_release_batch,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,wait_ready_avg,wait_active_avg,wait_dag_live_avg,max_wait_ready,max_wait_active,max_wait_dag_live,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
+echo "label,suite,repeat,threads,task_batch,runtime_batch_avg,runtime_batch_max,async_min_b,async_min_blocks,dag_max_live,dag_pin_workers,dag_critical_priority,pass_cross_panel_dag,pass_sync_cholesky,profile_enabled,ir_submit_deps,ir_submit_priority,ir_submit_plain,ir_wait_calls,ir_trsm_calls,ir_madd_calls,async_decisions,async_enabled,async_disabled,async_disabled_small_b,async_disabled_small_blocks,async_disabled_threads,async_disabled_single_block,serial_seconds,contestant_seconds,speedup,profile_calls,total_tasks,main_tasks,worker_tasks,flushes,dequeue_batches,priority_tasks,priority_dequeue_batches,max_batch,max_ready,max_priority_ready,ready_samples,ready_sum,ready_avg,ready_per_thread,dag_nodes,dag_edges,dag_satisfied_deps,dag_missing_deps,dag_first_touch_deps,dag_initial_ready,dag_released,dag_release_batches,max_dag_release_batch,max_dag_pending,max_dag_successors,max_dag_live,queue_ms,exec_ms,worker_idle_ms,main_wait_ms,wait_calls,wait_ms,wait_ready_avg,wait_active_avg,wait_dag_live_avg,max_wait_ready,max_wait_active,max_wait_dag_live,trsm_count,trsm_queue_ms,trsm_exec_ms,madd_count,madd_queue_ms,madd_exec_ms" > "${CSV}"
 
 run_suite() {
   local suite="$1"
@@ -120,6 +126,7 @@ run_suite() {
       COMPILER2026_ASYNC_MIN_BLOCKS="${ASYNC_MIN_BLOCKS}" \
       COMPILER2026_DAG_MAX_LIVE="${DAG_MAX_LIVE}" \
       COMPILER2026_DAG_PIN_WORKERS="${DAG_PIN_WORKERS}" \
+      COMPILER2026_DAG_CRITICAL_PRIORITY="${DAG_CRITICAL_PRIORITY}" \
         "${BENCH_DIR}/bin/contestant_app" \
         "${suite_dir}/input.bin" \
         "${suite_dir}/contestant_${run}.out" \
@@ -137,8 +144,9 @@ run_suite() {
 
     python3 - "${LABEL}" "${suite}" "${run}" "${THREADS}" "${TASK_BATCH}" \
       "${ASYNC_MIN_B}" "${ASYNC_MIN_BLOCKS}" "${DAG_MAX_LIVE}" \
-      "${DAG_PIN_WORKERS}" "${PROFILE}" \
-      "${IR_SUBMIT_DEPS}" "${IR_SUBMIT_PLAIN}" "${IR_WAIT_CALLS}" \
+      "${DAG_PIN_WORKERS}" "${DAG_CRITICAL_PRIORITY}" \
+      "${PASS_CROSS_PANEL_DAG}" "${PASS_SYNC_CHOLESKY}" "${PROFILE}" \
+      "${IR_SUBMIT_DEPS}" "${IR_SUBMIT_PRIORITY}" "${IR_SUBMIT_PLAIN}" "${IR_WAIT_CALLS}" \
       "${IR_TRSM_CALLS}" "${IR_MADD_CALLS}" \
       "${suite_dir}/serial_${run}.time" \
       "${suite_dir}/contestant_${run}.time" \
@@ -157,8 +165,12 @@ import sys
     async_min_blocks,
     dag_max_live,
     dag_pin_workers,
+    dag_critical_priority,
+    pass_cross_panel_dag,
+    pass_sync_cholesky,
     profile_enabled,
     ir_submit_deps,
+    ir_submit_priority,
     ir_submit_plain,
     ir_wait_calls,
     ir_trsm_calls,
@@ -189,6 +201,8 @@ summary_counts = {
     "worker_tasks": 0,
     "flushes": 0,
     "dequeue_batches": 0,
+    "priority_tasks": 0,
+    "priority_dequeue_batches": 0,
     "ready_samples": 0,
     "ready_sum": 0,
     "wait_calls": 0,
@@ -207,6 +221,7 @@ summary_counts = {
 summary_max = {
     "max_batch": 0,
     "max_ready": 0,
+    "max_priority_ready": 0,
     "max_dag_release_batch": 0,
     "max_dag_pending": 0,
     "max_dag_successors": 0,
@@ -291,8 +306,12 @@ writer.writerow([
     async_min_blocks,
     dag_max_live,
     dag_pin_workers,
+    dag_critical_priority,
+    pass_cross_panel_dag,
+    pass_sync_cholesky,
     "1" if profile_enabled not in ("", "0") else "0",
     ir_submit_deps,
+    ir_submit_priority,
     ir_submit_plain,
     ir_wait_calls,
     ir_trsm_calls,
@@ -313,8 +332,11 @@ writer.writerow([
     summary_counts["worker_tasks"],
     summary_counts["flushes"],
     summary_counts["dequeue_batches"],
+    summary_counts["priority_tasks"],
+    summary_counts["priority_dequeue_batches"],
     summary_max["max_batch"],
     summary_max["max_ready"],
+    summary_max["max_priority_ready"],
     ready_samples,
     ready_sum,
     f"{ready_avg:.3f}",
@@ -407,7 +429,11 @@ for threads in sorted({r["threads"] for r in rows}, key=thread_sort_key):
     print(
         "ir: "
         f"threads={threads} "
+        f"cross_panel={first['pass_cross_panel_dag']} "
+        f"sync_cholesky={first['pass_sync_cholesky']} "
+        f"critical_priority={first['dag_critical_priority']} "
         f"submit_deps={first['ir_submit_deps']} "
+        f"submit_priority={first['ir_submit_priority']} "
         f"submit_plain={first['ir_submit_plain']} "
         f"wait_calls={first['ir_wait_calls']} "
         f"trsm_calls={first['ir_trsm_calls']} "
@@ -456,6 +482,8 @@ if rows and any(r.get("profile_enabled") == "1" for r in rows):
                 f"threads={threads} "
                 f"tasks_avg={statistics.mean(int(r['total_tasks']) for r in task_rows):.1f} "
                 f"runtime_batch_max={max(int(r['runtime_batch_max']) for r in task_rows)} "
+                f"priority_tasks_avg={statistics.mean(int(r['priority_tasks']) for r in task_rows):.1f} "
+                f"max_priority_ready={max(int(r['max_priority_ready']) for r in task_rows)} "
                 f"ready_avg_avg={statistics.mean(float(r['ready_avg']) for r in task_rows):.3f} "
                 f"ready_per_thread_avg={statistics.mean(float(r['ready_per_thread']) for r in task_rows):.3f} "
                 f"dag_edges_avg={statistics.mean(int(r['dag_edges']) for r in task_rows):.1f} "

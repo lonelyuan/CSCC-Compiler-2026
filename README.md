@@ -23,6 +23,7 @@
 │   ├── CMakeLists.txt
 │   ├── README.md
 │   ├── manifest.json
+│   ├── src/baseline/          # 仅含官方允许的语义 annotation
 │   ├── pass/
 │   │   ├── CMakeLists.txt
 │   │   └── dag_pass.cpp
@@ -48,6 +49,7 @@
 - `submission/`：竞赛提交工程，评测平台会从这里构建 LLVM Pass 和 runtime。
 - `submission/pass/dag_pass.cpp`：LLVM Pass 实现，负责 IR 版本化、算子调用识别、task function 生成和同步点插入。
 - `submission/runtime/dag_runtime.cpp`：通用任务运行时，负责 worker 池、任务队列、arena 分配、wait 协作执行和可选 profiling。
+- `submission/src/baseline/`：judge-side baseline 副本；除函数级 `clang::annotate` 外与官方源码一致，用于向 Pass 声明版本化 tile-DAG 语义契约。
 - `docs/`：项目文档，已经从 `submission/docs` 提升到仓库根目录，便于统一维护。
 - `docs/optimization_principles.md`：面向基础编程读者的并行优化和算子图调度原理说明。
 - `docs/design.md`：实现级设计说明。
@@ -147,4 +149,4 @@ dist/submission.zip
 dist/submission.tar.gz
 ```
 
-其中 `submission.zip` 的压缩包根目录直接包含 `CMakeLists.txt`，适配评测平台直接对解压目录运行 CMake 的流程。
+其中 `submission.zip` 的压缩包根目录直接包含 `CMakeLists.txt`，适配评测平台直接对解压目录运行 CMake 的流程。压缩包只携带源码，不预置本机 `.so/.a`，避免 manifest 优先选中与评测机架构或 LLVM ABI 不兼容的产物；Pass/runtime 由 judge 在目标环境重新构建。

@@ -46,6 +46,11 @@ bool workerPinningEnabledFromEnv() {
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
+bool criticalPriorityEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_DAG_CRITICAL_PRIORITY");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 std::vector<int> allowedCpuList() {
     std::vector<int> cpus;
 #ifdef __linux__
@@ -69,6 +74,7 @@ class AsyncRuntime {
         void *context;
         std::uint64_t enqueue_ns;
         int dag_node = -1;
+        std::uint8_t priority = 0;
     };
 
     struct BatchProfile {
@@ -91,6 +97,8 @@ class AsyncRuntime {
         void *context = nullptr;
         int pending = 0;
         bool completed = false;
+        // Reuse the padding after completed: DagNode stays 40 B on 64-bit hosts.
+        std::uint8_t priority = 0;
         int first_successor = -1;
         int last_successor = -1;
         std::size_t successor_count = 0;
@@ -103,7 +111,8 @@ class AsyncRuntime {
 
 public:
     explicit AsyncRuntime(std::size_t worker_count)
-        : pin_workers_(workerPinningEnabledFromEnv()),
+        : critical_priority_enabled_(criticalPriorityEnabledFromEnv()),
+          pin_workers_(workerPinningEnabledFromEnv()),
           worker_cpus_(pin_workers_ ? allowedCpuList() : std::vector<int>{}) {
         if (worker_count == 0) {
             return;
@@ -176,11 +185,15 @@ public:
             profile_output_keys_.reserve(reserve_tasks);
         }
         tasks_.clear();
+        for (auto &queue : priority_tasks_) {
+            queue.clear();
+        }
         dag_nodes_.clear();
         successor_edges_.clear();
         latest_producer_.clear();
         pending_dag_tasks_ = 0;
         task_head_ = 0;
+        priority_task_heads_.fill(0);
         chunk_offset_ = 0;
         pending_count_ = 0;
         task_batch_size_ = std::max<std::size_t>(
@@ -212,10 +225,12 @@ public:
     }
 
     void submitWithDeps(TaskFn fn, void *context, const int *deps, std::size_t dep_count,
-                        int output) {
+                        int output, int priority = 0) {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        const std::uint8_t task_priority = static_cast<std::uint8_t>(
+            critical_priority_enabled_ ? std::max(0, std::min(priority, 3)) : 0);
         if (workers_.empty()) {
-            Task task{fn, context, profiling ? nowNs() : 0};
+            Task task{fn, context, profiling ? nowNs() : 0, -1, task_priority};
             BatchProfile profile = runBatch(&task, 1, profiling);
             if (profiling) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -228,7 +243,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const int node_index = static_cast<int>(dag_nodes_.size());
-            dag_nodes_.push_back({fn, context, 0, false});
+            dag_nodes_.push_back(
+                {fn, context, 0, false, task_priority, -1, -1, 0});
             ++pending_dag_tasks_;
             if (profiling) {
                 ++profile_dag_nodes_;
@@ -301,11 +317,14 @@ public:
             }
 
             if (dag_nodes_[node_index].pending == 0) {
-                enqueueTaskLocked({fn, context, profiling ? nowNs() : 0, node_index});
+                enqueueTaskLocked(
+                    {fn, context, profiling ? nowNs() : 0, node_index,
+                     task_priority});
                 if (profiling) {
                     ++profile_dag_initial_ready_;
                 }
-                should_notify = (tasks_.size() - task_head_) <= workers_.size();
+                should_notify =
+                    task_priority > 0 || readyTaskCountLocked() <= workers_.size();
             }
         }
 
@@ -322,7 +341,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             enqueueTaskLocked(task);
-            const std::size_t ready = tasks_.size() - task_head_;
+            const std::size_t ready = readyTaskCountLocked();
             should_notify = ready <= workers_.size();
         }
         if (should_notify) {
@@ -364,7 +383,7 @@ public:
             bool dag_deadlock = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                if (task_head_ < tasks_.size()) {
+                if (hasReadyTasksLocked()) {
                     batch_count = takeReadyTasksLocked(batch.data());
                 } else if (active_tasks_ == 0) {
                     if (pending_dag_tasks_ == 0) {
@@ -400,7 +419,7 @@ public:
                 if (released > 0) {
                     work_cv_.notify_all();
                 }
-                if (tasks_.empty() && active_tasks_ == 0) {
+                if (!hasReadyTasksLocked() && active_tasks_ == 0) {
                     done_cv_.notify_all();
                 }
             }
@@ -449,7 +468,7 @@ public:
                         break;
                     }
 
-                    if (task_head_ < tasks_.size()) {
+                    if (hasReadyTasksLocked()) {
                         batch_count = takeReadyTasksLocked(batch.data());
                     } else if (active_tasks_ == 0) {
                         dag_deadlock = true;
@@ -485,7 +504,8 @@ public:
                     if (released > 0) {
                         work_cv_.notify_all();
                     }
-                    if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
+                    if (key_waiters_ > 0 ||
+                        (!hasReadyTasksLocked() && active_tasks_ == 0)) {
                         done_cv_.notify_all();
                     }
                 }
@@ -540,11 +560,11 @@ private:
             const std::uint64_t wait_start_ns = profiling ? nowNs() : 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                work_cv_.wait(lock, [this]() { return stopping_ || task_head_ < tasks_.size(); });
+                work_cv_.wait(lock, [this]() { return stopping_ || hasReadyTasksLocked(); });
                 if (profiling) {
                     worker_idle_ns_ += nowNs() - wait_start_ns;
                 }
-                if (stopping_ && task_head_ == tasks_.size()) {
+                if (stopping_ && !hasReadyTasksLocked()) {
                     return;
                 }
                 batch_count = takeReadyTasksLocked(batch.data());
@@ -561,7 +581,8 @@ private:
                 if (released > 0) {
                     work_cv_.notify_all();
                 }
-                if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
+                if (key_waiters_ > 0 ||
+                    (!hasReadyTasksLocked() && active_tasks_ == 0)) {
                     done_cv_.notify_all();
                 }
             }
@@ -577,7 +598,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.insert(tasks_.end(), pending_tasks_.begin(),
                           pending_tasks_.begin() + pending_count_);
-            recordReadyWidthLocked(tasks_.size() - task_head_);
+            recordReadyWidthLocked(readyTaskCountLocked());
             if (profile_enabled_.load(std::memory_order_relaxed)) {
                 ++submit_flushes_;
             }
@@ -586,7 +607,82 @@ private:
         work_cv_.notify_all();
     }
 
+    std::size_t normalReadyCountLocked() const {
+        return tasks_.size() - task_head_;
+    }
+
+    std::size_t priorityReadyCountLocked() const {
+        std::size_t ready = 0;
+        for (std::size_t i = 0; i < priority_tasks_.size(); ++i) {
+            ready += priority_tasks_[i].size() - priority_task_heads_[i];
+        }
+        return ready;
+    }
+
+    std::size_t readyTaskCountLocked() const {
+        const std::size_t normal_ready = normalReadyCountLocked();
+        if (!critical_priority_enabled_) {
+            return normal_ready;
+        }
+        return normal_ready + priorityReadyCountLocked();
+    }
+
+    bool hasReadyTasksLocked() const {
+        // Preserve the original normal-queue check as the default hot path.
+        if (task_head_ < tasks_.size()) {
+            return true;
+        }
+        return critical_priority_enabled_ && priorityReadyCountLocked() != 0;
+    }
+
     std::size_t takeReadyTasksLocked(Task *batch) {
+        if (!critical_priority_enabled_) {
+            return takeNormalReadyTasksLocked(batch);
+        }
+
+        int priority_level = 0;
+        for (int level = 3; level >= 1; --level) {
+            const std::size_t index = static_cast<std::size_t>(level - 1);
+            if (priority_task_heads_[index] < priority_tasks_[index].size()) {
+                priority_level = level;
+                break;
+            }
+        }
+        const bool take_priority = priority_level != 0;
+        std::vector<Task> &queue =
+            take_priority
+                ? priority_tasks_[static_cast<std::size_t>(priority_level - 1)]
+                : tasks_;
+        std::size_t &head =
+            take_priority
+                ? priority_task_heads_[static_cast<std::size_t>(priority_level - 1)]
+                : task_head_;
+        const std::size_t available = queue.size() - head;
+        // Rank 2/3 form the diagonal chain and release successors immediately.
+        // Rank 1 is a wider frontier, so it keeps adaptive batching to avoid
+        // recreating one global-lock operation per trsm/update task.
+        const std::size_t count =
+            priority_level >= 2 ? 1 : chooseBatchCount(available);
+        for (std::size_t i = 0; i < count; ++i) {
+            batch[i] = queue[head + i];
+        }
+        head += count;
+        active_tasks_ += count;
+        if (profile_enabled_.load(std::memory_order_relaxed)) {
+            ++dequeue_batches_;
+            if (take_priority) {
+                ++priority_dequeue_batches_;
+            }
+            max_dequeue_batch_ = std::max(max_dequeue_batch_, count);
+        }
+        if (head == queue.size()) {
+            queue.clear();
+            head = 0;
+        }
+        return count;
+    }
+
+    std::size_t takeNormalReadyTasksLocked(Task *batch) {
         const std::size_t available = tasks_.size() - task_head_;
         const std::size_t count = chooseBatchCount(available);
         for (std::size_t i = 0; i < count; ++i) {
@@ -606,8 +702,19 @@ private:
     }
 
     void enqueueTaskLocked(Task task) {
-        tasks_.push_back(task);
-        recordReadyWidthLocked(tasks_.size() - task_head_);
+        if (!critical_priority_enabled_) {
+            tasks_.push_back(task);
+            recordReadyWidthLocked(normalReadyCountLocked());
+            return;
+        }
+        if (task.priority > 0) {
+            const std::size_t index = static_cast<std::size_t>(
+                task.priority - 1);
+            priority_tasks_[index].push_back(task);
+        } else {
+            tasks_.push_back(task);
+        }
+        recordReadyWidthLocked(readyTaskCountLocked());
     }
 
     std::size_t completeDagTasksLocked(const Task *batch, std::size_t count) {
@@ -633,7 +740,7 @@ private:
                 if (successor.pending == 0) {
                     enqueueTaskLocked({successor.fn, successor.context,
                                        profile_enabled_.load(std::memory_order_relaxed) ? nowNs() : 0,
-                                       edge.successor});
+                                       edge.successor, successor.priority});
                     if (profile_enabled_.load(std::memory_order_relaxed)) {
                         ++profile_dag_released_;
                     }
@@ -662,7 +769,7 @@ private:
             std::size_t batch_count = 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (pending_dag_tasks_ <= max_live_window_ || task_head_ >= tasks_.size()) {
+                if (pending_dag_tasks_ <= max_live_window_ || !hasReadyTasksLocked()) {
                     return;
                 }
                 batch_count = takeReadyTasksLocked(batch.data());
@@ -681,7 +788,8 @@ private:
                 if (released > 0) {
                     work_cv_.notify_all();
                 }
-                if (key_waiters_ > 0 || (tasks_.empty() && active_tasks_ == 0)) {
+                if (key_waiters_ > 0 ||
+                    (!hasReadyTasksLocked() && active_tasks_ == 0)) {
                     done_cv_.notify_all();
                 }
             }
@@ -732,6 +840,10 @@ private:
             return;
         }
         max_ready_tasks_ = std::max(max_ready_tasks_, ready);
+        if (critical_priority_enabled_) {
+            max_priority_ready_ =
+                std::max(max_priority_ready_, priorityReadyCountLocked());
+        }
         ++ready_width_samples_;
         ready_width_sum_ += ready;
     }
@@ -745,7 +857,7 @@ private:
     }
 
     void recordWaitEntryLocked() {
-        const std::size_t ready = tasks_.size() - task_head_;
+        const std::size_t ready = readyTaskCountLocked();
         wait_ready_sum_ += ready;
         wait_active_sum_ += active_tasks_;
         wait_dag_live_sum_ += pending_dag_tasks_;
@@ -793,6 +905,9 @@ private:
         }
 
         for (std::size_t i = 0; i < count; ++i) {
+            if (batch[i].priority > 0) {
+                ++profile_priority_tasks_;
+            }
             TaskProfile &task_profile = profileForTaskLocked(batch[i].fn);
             ++task_profile.count;
             task_profile.queue_ns += profile.task_queue_ns[i];
@@ -821,6 +936,8 @@ private:
         wait_dag_live_sum_ = 0;
         submit_flushes_ = 0;
         dequeue_batches_ = 0;
+        profile_priority_tasks_ = 0;
+        priority_dequeue_batches_ = 0;
         profile_dag_nodes_ = 0;
         profile_dag_edges_ = 0;
         profile_dag_satisfied_deps_ = 0;
@@ -840,6 +957,7 @@ private:
         max_wait_dag_live_ = 0;
         max_dequeue_batch_ = 0;
         max_ready_tasks_ = 0;
+        max_priority_ready_ = 0;
         task_profile_count_ = 0;
         task_profiles_ = {};
     }
@@ -854,7 +972,9 @@ private:
                      "[compiler2026_profile] n=%d b=%d threads=%zu workers=%zu "
                      "batch=%zu tasks=%llu main_tasks=%llu worker_tasks=%llu "
                      "flushes=%llu dequeue_batches=%llu max_batch=%zu max_ready=%zu "
-                     "ready_samples=%llu ready_sum=%llu "
+                     "ready_samples=%llu ready_sum=%llu priority_enabled=%d "
+                     "priority_tasks=%llu priority_dequeue_batches=%llu "
+                     "max_priority_ready=%zu "
                      "dag_nodes=%llu dag_edges=%llu dag_satisfied_deps=%llu "
                      "dag_missing_deps=%llu dag_first_touch_deps=%llu "
                      "dag_initial_ready=%llu "
@@ -873,6 +993,10 @@ private:
                      max_dequeue_batch_, max_ready_tasks_,
                      static_cast<unsigned long long>(ready_width_samples_),
                      static_cast<unsigned long long>(ready_width_sum_),
+                     critical_priority_enabled_ ? 1 : 0,
+                     static_cast<unsigned long long>(profile_priority_tasks_),
+                     static_cast<unsigned long long>(priority_dequeue_batches_),
+                     max_priority_ready_,
                      static_cast<unsigned long long>(profile_dag_nodes_),
                      static_cast<unsigned long long>(profile_dag_edges_),
                      static_cast<unsigned long long>(profile_dag_satisfied_deps_),
@@ -908,6 +1032,7 @@ private:
 
     std::vector<std::thread> workers_;
     std::vector<Task> tasks_;
+    std::array<std::vector<Task>, 3> priority_tasks_;
     std::vector<DagNode> dag_nodes_;
     std::vector<DagEdge> successor_edges_;
     std::unordered_map<int, int> latest_producer_;
@@ -915,6 +1040,7 @@ private:
     std::size_t pending_dag_tasks_ = 0;
     std::array<Task, kMaxTaskBatch> pending_tasks_{};
     std::size_t task_head_ = 0;
+    std::array<std::size_t, 3> priority_task_heads_{};
     std::size_t pending_count_ = 0;
     std::size_t task_batch_size_ = 1;
     std::size_t max_live_window_ = 0;
@@ -948,6 +1074,8 @@ private:
     std::uint64_t wait_dag_live_sum_ = 0;
     std::uint64_t submit_flushes_ = 0;
     std::uint64_t dequeue_batches_ = 0;
+    std::uint64_t profile_priority_tasks_ = 0;
+    std::uint64_t priority_dequeue_batches_ = 0;
     std::uint64_t profile_dag_nodes_ = 0;
     std::uint64_t profile_dag_edges_ = 0;
     std::uint64_t profile_dag_satisfied_deps_ = 0;
@@ -960,6 +1088,7 @@ private:
     std::uint64_t ready_width_sum_ = 0;
     std::size_t max_dequeue_batch_ = 0;
     std::size_t max_ready_tasks_ = 0;
+    std::size_t max_priority_ready_ = 0;
     std::size_t max_dag_release_batch_ = 0;
     std::size_t max_dag_pending_ = 0;
     std::size_t max_dag_successors_ = 0;
@@ -969,6 +1098,7 @@ private:
     std::size_t max_wait_dag_live_ = 0;
     std::array<TaskProfile, kMaxProfiledTasks> task_profiles_{};
     std::size_t task_profile_count_ = 0;
+    bool critical_priority_enabled_ = false;
     bool pin_workers_ = false;
     std::vector<int> worker_cpus_;
 };
@@ -1174,6 +1304,13 @@ extern "C" void compiler2026_runtime_submit_deps3(TaskFn fn, void *context,
                                                    int output) {
     const int deps[] = {dep_a, dep_b, dep_c};
     activeRuntime().submitWithDeps(fn, context, deps, 3, output);
+}
+
+extern "C" void compiler2026_runtime_submit_deps3_priority(
+    TaskFn fn, void *context, int dep_a, int dep_b, int dep_c, int output,
+    int priority) {
+    const int deps[] = {dep_a, dep_b, dep_c};
+    activeRuntime().submitWithDeps(fn, context, deps, 3, output, priority);
 }
 
 extern "C" void compiler2026_runtime_wait() {

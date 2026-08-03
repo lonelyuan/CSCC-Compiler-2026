@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(ContestantPass LANGUAGES C CXX)
 
-find_program(LLVM_CONFIG NAMES llvm-config llvm-config-20 llvm-config-19 llvm-config-18 llvm-config-17 REQUIRED)
+find_program(LLVM_CONFIG NAMES llvm-config llvm-config-20 llvm-config-19 llvm-config-18 llvm-config-17 llvm-config-16 llvm-config-15 REQUIRED)
 
 function(run_llvm_config out_var)
   execute_process(
@@ -45,4 +45,3 @@ endif()
 set_target_properties(contestant_pass PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pass"
 )
-

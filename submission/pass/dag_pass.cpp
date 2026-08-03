@@ -27,11 +27,15 @@ constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
 constexpr const char *kSubmitDeps3 = "compiler2026_runtime_submit_deps3";
+constexpr const char *kSubmitDeps3Priority =
+    "compiler2026_runtime_submit_deps3_priority";
 constexpr const char *kRegisterTask = "compiler2026_runtime_register_task";
 constexpr const char *kShouldAsync = "compiler2026_runtime_should_async";
 constexpr const char *kWait = "compiler2026_runtime_wait";
 constexpr const char *kWaitKey = "compiler2026_runtime_wait_key";
 constexpr const char *kEnd = "compiler2026_runtime_end";
+constexpr const char *kTileDagAnnotation =
+    "compiler2026.graph.block_cholesky.tile_dag.v1";
 constexpr int kNoOutputKey = -1;
 
 struct RuntimeApi {
@@ -40,6 +44,7 @@ struct RuntimeApi {
     llvm::FunctionCallee submit;
     llvm::FunctionCallee submit_deps;
     llvm::FunctionCallee submit_deps3;
+    llvm::FunctionCallee submit_deps3_priority;
     llvm::FunctionCallee register_task;
     llvm::FunctionCallee should_async;
     llvm::FunctionCallee wait;
@@ -57,6 +62,13 @@ struct BlockCoordinate {
     llvm::Value *row;
     llvm::Value *col;
     llvm::Value *linear_key;
+};
+
+enum class SemanticPriority {
+    none,
+    cholesky,
+    trsm,
+    madd,
 };
 
 bool isBlockCholesky(llvm::Function &function) {
@@ -85,6 +97,44 @@ bool crossPanelSyncCholeskyEnabledFromEnv() {
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
+bool criticalPriorityEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_DAG_CRITICAL_PRIORITY");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool hasFunctionAnnotation(llvm::Function &function, llvm::StringRef annotation) {
+    llvm::GlobalVariable *annotations =
+        function.getParent()->getGlobalVariable("llvm.global.annotations");
+    if (annotations == nullptr || !annotations->hasInitializer()) {
+        return false;
+    }
+
+    auto *entries = llvm::dyn_cast<llvm::ConstantArray>(annotations->getInitializer());
+    if (entries == nullptr) {
+        return false;
+    }
+
+    for (llvm::Value *entry_value : entries->operands()) {
+        auto *entry = llvm::dyn_cast<llvm::ConstantStruct>(entry_value);
+        if (entry == nullptr || entry->getNumOperands() < 2 ||
+            entry->getOperand(0)->stripPointerCasts() != &function) {
+            continue;
+        }
+
+        auto *text_global = llvm::dyn_cast<llvm::GlobalVariable>(
+            entry->getOperand(1)->stripPointerCasts());
+        if (text_global == nullptr || !text_global->hasInitializer()) {
+            continue;
+        }
+        auto *text =
+            llvm::dyn_cast<llvm::ConstantDataSequential>(text_global->getInitializer());
+        if (text != nullptr && text->isCString() && text->getAsCString() == annotation) {
+            return true;
+        }
+    }
+    return false;
+}
+
 llvm::FunctionCallee declareVoidRuntime(llvm::Module &module, const char *name,
                                         llvm::ArrayRef<llvm::Type *> args) {
     llvm::FunctionType *fn_ty =
@@ -108,6 +158,9 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kSubmitDeps3,
                            {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty}),
+        declareVoidRuntime(module, kSubmitDeps3Priority,
+                           {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty,
+                            int32_ty}),
         declareVoidRuntime(module, kRegisterTask, {ptr_ty, ptr_ty}),
         module.getOrInsertFunction(kShouldAsync,
                                    llvm::FunctionType::get(int32_ty, {int32_ty, int32_ty}, false)),
@@ -280,6 +333,7 @@ llvm::Function *cloneForAsync(llvm::Function &function) {
     llvm::SmallVector<llvm::ReturnInst *, 4> returns;
     llvm::CloneFunctionInto(async_fn, &function, value_map,
                             llvm::CloneFunctionChangeType::LocalChangesOnly, returns);
+    async_fn->setDSOLocal(true);
     return async_fn;
 }
 
@@ -363,25 +417,44 @@ bool canBuildLinearElementOffset(llvm::Value *ptr) {
     return !llvm::isa<llvm::GEPOperator>(base) || canBuildLinearElementOffset(base);
 }
 
-bool canBuildBlockCoordinate(llvm::Value *ptr) {
+bool canBuildBlockCoordinate(llvm::Value *ptr, llvm::Value *semantic_base = nullptr) {
+    if (semantic_base != nullptr) {
+        return ptr->getType()->isPointerTy() && semantic_base->getType()->isPointerTy();
+    }
     return canBuildLinearElementOffset(ptr);
 }
 
 std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
                                                    llvm::Value *ptr,
-                                                   llvm::Value *n, llvm::Value *b) {
+                                                   llvm::Value *n, llvm::Value *b,
+                                                   llvm::Value *semantic_base = nullptr) {
     llvm::Module *module = builder.GetInsertBlock()->getModule();
     llvm::Type *offset_ty = llvm::IntegerType::get(
         module->getContext(), module->getDataLayout().getPointerSizeInBits());
-    std::optional<llvm::Value *> offset = buildLinearElementOffset(builder, ptr, offset_ty);
-    if (!offset) {
-        return std::nullopt;
+    llvm::Value *element_offset = nullptr;
+    if (semantic_base != nullptr && ptr->getType()->isPointerTy() &&
+        semantic_base->getType()->isPointerTy()) {
+        // tile_dag.v1 guarantees that operator tile pointers are derived from
+        // the row-major double matrix L. Pointer subtraction therefore remains
+        // valid even after Clang folds the original GEP chain into PHI nodes.
+        llvm::Value *ptr_int = builder.CreatePtrToInt(ptr, offset_ty);
+        llvm::Value *base_int = builder.CreatePtrToInt(semantic_base, offset_ty);
+        llvm::Value *byte_offset = builder.CreateSub(ptr_int, base_int);
+        element_offset = builder.CreateSDiv(
+            byte_offset, llvm::ConstantInt::get(offset_ty, sizeof(double)));
+    } else {
+        std::optional<llvm::Value *> offset =
+            buildLinearElementOffset(builder, ptr, offset_ty);
+        if (!offset) {
+            return std::nullopt;
+        }
+        element_offset = *offset;
     }
 
-    llvm::Value *wide_n = builder.CreateSExtOrTrunc(n, (*offset)->getType());
-    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, (*offset)->getType());
-    llvm::Value *element_row = builder.CreateSDiv(*offset, wide_n);
-    llvm::Value *element_col = builder.CreateSRem(*offset, wide_n);
+    llvm::Value *wide_n = builder.CreateSExtOrTrunc(n, element_offset->getType());
+    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, element_offset->getType());
+    llvm::Value *element_row = builder.CreateSDiv(element_offset, wide_n);
+    llvm::Value *element_col = builder.CreateSRem(element_offset, wide_n);
     llvm::Value *block_row = builder.CreateSDiv(element_row, wide_b);
     llvm::Value *block_col = builder.CreateSDiv(element_col, wide_b);
     llvm::Value *block_count = builder.CreateSDiv(wide_n, wide_b);
@@ -395,14 +468,15 @@ std::optional<BlockCoordinate> buildBlockCoordinate(llvm::IRBuilder<> &builder,
 }
 
 bool insertWaitForBlockKey(llvm::CallBase *call, llvm::Value *n, llvm::Value *b,
-                           unsigned arg_index) {
+                           unsigned arg_index, llvm::Value *semantic_base = nullptr) {
     if (arg_index >= call->arg_size()) {
         return false;
     }
 
     llvm::IRBuilder<> builder(call);
     std::optional<BlockCoordinate> coord =
-        buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b);
+        buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b,
+                             semantic_base);
     if (!coord) {
         return false;
     }
@@ -416,19 +490,26 @@ bool insertWaitForBlockKey(llvm::CallBase *call, llvm::Value *n, llvm::Value *b,
 bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
                                       TaskIr &task_ir, llvm::Function *task_fn,
                                       llvm::Value *n, llvm::Value *b,
-                                      llvm::ArrayRef<unsigned> dep_args, int output_arg) {
+                                      llvm::ArrayRef<unsigned> dep_args, int output_arg,
+                                      SemanticPriority semantic_priority =
+                                          SemanticPriority::none,
+                                      llvm::Value *semantic_base = nullptr) {
     llvm::Module *module = call->getModule();
     llvm::IRBuilder<> builder(call);
 
     std::vector<llvm::Value *> dep_keys;
-    dep_keys.reserve(2);
+    std::vector<BlockCoordinate> dep_coords;
+    dep_keys.reserve(3);
+    dep_coords.reserve(3);
     for (unsigned arg_index : dep_args) {
         std::optional<BlockCoordinate> coord =
-            buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b);
+            buildBlockCoordinate(builder, call->getArgOperand(arg_index), n, b,
+                                 semantic_base);
         if (!coord) {
             return false;
         }
         dep_keys.push_back(coord->linear_key);
+        dep_coords.push_back(*coord);
     }
 
     while (dep_keys.size() < 2) {
@@ -436,14 +517,52 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
     }
 
     llvm::Value *output_key = builder.getInt32(kNoOutputKey);
+    std::optional<BlockCoordinate> output_coord;
     if (output_arg >= 0) {
-        std::optional<BlockCoordinate> output_coord =
+        output_coord =
             buildBlockCoordinate(builder, call->getArgOperand(static_cast<unsigned>(output_arg)),
-                                 n, b);
+                                 n, b, semantic_base);
         if (!output_coord) {
             return false;
         }
         output_key = output_coord->linear_key;
+    }
+
+    llvm::Value *priority = nullptr;
+    switch (semantic_priority) {
+    case SemanticPriority::none:
+        break;
+    case SemanticPriority::cholesky:
+        priority = builder.getInt32(3);
+        break;
+    case SemanticPriority::trsm:
+        if (!output_coord) {
+            return false;
+        }
+        priority = builder.CreateSelect(
+            builder.CreateICmpEQ(output_coord->row,
+                                 builder.CreateAdd(output_coord->col,
+                                                   llvm::ConstantInt::get(
+                                                       output_coord->col->getType(), 1))),
+            builder.getInt32(2), builder.getInt32(1));
+        break;
+    case SemanticPriority::madd:
+        if (!output_coord || dep_coords.empty()) {
+            return false;
+        }
+        llvm::Value *updates_next_panel = builder.CreateICmpEQ(
+            output_coord->col,
+            builder.CreateAdd(dep_coords.front().col,
+                              llvm::ConstantInt::get(
+                                  dep_coords.front().col->getType(), 1)));
+        llvm::Value *updates_diagonal =
+            builder.CreateICmpEQ(output_coord->row, output_coord->col);
+        priority = builder.CreateSelect(
+            updates_next_panel,
+            builder.CreateSelect(updates_diagonal, builder.getInt32(3),
+                                 builder.getInt32(1)),
+            builder.getInt32(0));
+        break;
     }
 
     const llvm::DataLayout &layout = module->getDataLayout();
@@ -468,7 +587,14 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
         }
     }
 
-    if (dep_keys.size() > 2) {
+    if (priority != nullptr) {
+        while (dep_keys.size() < 3) {
+            dep_keys.push_back(builder.getInt32(kNoOutputKey));
+        }
+        builder.CreateCall(runtime.submit_deps3_priority,
+                           {task_fn, context, dep_keys[0], dep_keys[1], dep_keys[2],
+                            output_key, priority});
+    } else if (dep_keys.size() > 2) {
         builder.CreateCall(runtime.submit_deps3,
                            {task_fn, context, dep_keys[0], dep_keys[1], dep_keys[2],
                             output_key});
@@ -481,11 +607,12 @@ bool replaceOperatorCallWithDagSubmit(llvm::CallBase *call, RuntimeApi &runtime,
 }
 
 bool callsHaveCoordinates(llvm::ArrayRef<llvm::CallBase *> calls,
-                          llvm::ArrayRef<unsigned> arg_indices) {
+                          llvm::ArrayRef<unsigned> arg_indices,
+                          llvm::Value *semantic_base = nullptr) {
     for (llvm::CallBase *call : calls) {
         for (unsigned arg_index : arg_indices) {
             if (arg_index >= call->arg_size() ||
-                !canBuildBlockCoordinate(call->getArgOperand(arg_index))) {
+                !canBuildBlockCoordinate(call->getArgOperand(arg_index), semantic_base)) {
                 return false;
             }
         }
@@ -493,13 +620,14 @@ bool callsHaveCoordinates(llvm::ArrayRef<llvm::CallBase *> calls,
     return true;
 }
 
-void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir) {
+void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir,
+                            bool has_tile_dag_annotation) {
     llvm::DominatorTree dominator_tree(async_fn);
     llvm::LoopInfo loop_info(dominator_tree);
 
     auto arg = async_fn.arg_begin();
     (void)&*arg++;
-    (void)&*arg++;
+    llvm::Value *matrix_l = &*arg++;
     llvm::Value *n = &*arg++;
     llvm::Value *b = &*arg++;
 
@@ -536,37 +664,49 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
     std::set<llvm::BasicBlock *> wait_blocks;
     const bool cross_panel_enabled = crossPanelDagEnabledFromEnv();
     const bool sync_cholesky = crossPanelSyncCholeskyEnabledFromEnv();
+    const bool use_semantic_priority =
+        cross_panel_enabled && has_tile_dag_annotation && criticalPriorityEnabledFromEnv();
+    llvm::Value *semantic_base =
+        cross_panel_enabled && has_tile_dag_annotation ? matrix_l : nullptr;
     const bool can_cross_panel_sync =
         cross_panel_enabled &&
         sync_cholesky &&
         !cholesky_calls.empty() &&
-        callsHaveCoordinates(cholesky_calls, {0}) &&
-        callsHaveCoordinates(trsm_calls, {0, 1, 2}) &&
-        callsHaveCoordinates(madd_calls, {0, 1, 2});
+        callsHaveCoordinates(cholesky_calls, {0}, semantic_base) &&
+        callsHaveCoordinates(trsm_calls, {0, 1, 2}, semantic_base) &&
+        callsHaveCoordinates(madd_calls, {0, 1, 2}, semantic_base);
     const bool can_cross_panel_task =
         cross_panel_enabled &&
         !sync_cholesky &&
         !cholesky_calls.empty() &&
-        callsHaveCoordinates(cholesky_calls, {0, 1}) &&
-        callsHaveCoordinates(trsm_calls, {0, 1, 2}) &&
-        callsHaveCoordinates(madd_calls, {0, 1, 2});
+        callsHaveCoordinates(cholesky_calls, {0, 1}, semantic_base) &&
+        callsHaveCoordinates(trsm_calls, {0, 1, 2}, semantic_base) &&
+        callsHaveCoordinates(madd_calls, {0, 1, 2}, semantic_base);
 
     if (can_cross_panel_sync) {
         for (llvm::CallBase *call : cholesky_calls) {
-            if (!insertWaitForBlockKey(call, n, b, 0)) {
+            if (!insertWaitForBlockKey(call, n, b, 0, semantic_base)) {
                 return;
             }
         }
 
         for (llvm::CallBase *call : trsm_calls) {
             replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                             n, b, {0, 1}, 2);
+                                             n, b, {0, 1}, 2,
+                                             use_semantic_priority
+                                                 ? SemanticPriority::trsm
+                                                 : SemanticPriority::none,
+                                             semantic_base);
         }
 
         for (llvm::CallBase *call : madd_calls) {
             llvm::Loop *outer_loop = outermostLoop(loop_info.getLoopFor(call->getParent()));
             replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                             n, b, {0, 1, 2}, 2);
+                                             n, b, {0, 1, 2}, 2,
+                                             use_semantic_priority
+                                                 ? SemanticPriority::madd
+                                                 : SemanticPriority::none,
+                                             semantic_base);
             addLoopExitWaits(outer_loop, runtime.wait, wait_blocks);
         }
     } else if (can_cross_panel_task) {
@@ -577,24 +717,37 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
 
         for (llvm::CallBase *call : cholesky_calls) {
             replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.cholesky_task,
-                                             n, b, {0}, 1);
+                                             n, b, {0}, 1,
+                                             use_semantic_priority
+                                                 ? SemanticPriority::cholesky
+                                                 : SemanticPriority::none,
+                                             semantic_base);
         }
 
         for (llvm::CallBase *call : trsm_calls) {
             replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                             n, b, {0, 1}, 2);
+                                             n, b, {0, 1}, 2,
+                                             use_semantic_priority
+                                                 ? SemanticPriority::trsm
+                                                 : SemanticPriority::none,
+                                             semantic_base);
         }
 
         for (llvm::CallBase *call : madd_calls) {
             llvm::Loop *outer_loop = outermostLoop(loop_info.getLoopFor(call->getParent()));
             replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                             n, b, {0, 1, 2}, 2);
+                                             n, b, {0, 1, 2}, 2,
+                                             use_semantic_priority
+                                                 ? SemanticPriority::madd
+                                                 : SemanticPriority::none,
+                                             semantic_base);
             addLoopExitWaits(outer_loop, runtime.wait, wait_blocks);
         }
     } else {
         for (llvm::CallBase *call : trsm_calls) {
             if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                                  n, b, {}, 0)) {
+                                                  n, b, {}, 0, SemanticPriority::none,
+                                                  semantic_base)) {
                 llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
                 addLoopExitWaits(loop, runtime.wait, wait_blocks);
                 replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
@@ -609,7 +762,8 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             // Panel-local scheduling waits before the next panel, so madd outputs
             // have no downstream async consumers in the current DAG scope.
             if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                                  n, b, {0, 1}, kNoOutputKey)) {
+                                                  n, b, {0, 1}, kNoOutputKey,
+                                                  SemanticPriority::none, semantic_base)) {
                 replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
             }
         }
@@ -641,8 +795,10 @@ public:
         llvm::Value *n = &*arg++;
         llvm::Value *b = &*arg++;
 
+        const bool has_tile_dag_annotation =
+            hasFunctionAnnotation(function, kTileDagAnnotation);
         llvm::Function *async_fn = cloneForAsync(function);
-        transformAsyncFunction(*async_fn, runtime, task_ir);
+        transformAsyncFunction(*async_fn, runtime, task_ir, has_tile_dag_annotation);
         insertAsyncDispatch(function, async_fn, runtime.should_async, n, b);
 
         return llvm::PreservedAnalyses::none();

@@ -11,7 +11,8 @@ DOCS_DIR="${REPO_ROOT}/docs"
 "${SUBMISSION_DIR}/scripts/build.sh"
 
 rm -rf "${DIST_DIR}"
-mkdir -p "${DIST_DIR}/pass" "${DIST_DIR}/runtime" "${DIST_DIR}/docs" "${DIST_DIR}/scripts"
+mkdir -p "${DIST_DIR}/pass" "${DIST_DIR}/runtime" "${DIST_DIR}/docs" \
+  "${DIST_DIR}/scripts" "${DIST_DIR}/src/baseline"
 
 cp "${SUBMISSION_DIR}/CMakeLists.txt" "${DIST_DIR}/CMakeLists.txt"
 cp "${SUBMISSION_DIR}/manifest.json" "${DIST_DIR}/manifest.json"
@@ -26,8 +27,12 @@ cp -R "${DOCS_DIR}/benchmark_results" "${DIST_DIR}/docs/benchmark_results"
 cp -R "${SUBMISSION_DIR}/pass/." "${DIST_DIR}/pass/"
 cp -R "${SUBMISSION_DIR}/runtime/." "${DIST_DIR}/runtime/"
 cp -R "${SUBMISSION_DIR}/scripts/." "${DIST_DIR}/scripts/"
-cp "${BUILD_DIR}/pass/libcontestant_pass.so" "${DIST_DIR}/pass/"
-cp "${BUILD_DIR}/runtime/libcontestant_runtime.a" "${DIST_DIR}/runtime/"
+cp -R "${SUBMISSION_DIR}/src/baseline/." "${DIST_DIR}/src/baseline/"
+
+# Keep the archive source-only. The official judge builds the CMake project and
+# resolves manifest artifacts from its build directory. Shipping host binaries
+# here would take precedence over those rebuilt artifacts and can silently
+# inject an incompatible Mach-O/x86_64 or stale LLVM ABI into an ARM evaluation.
 
 tar -C "${DIST_DIR}" -czf "${REPO_ROOT}/dist/submission.tar.gz" .
 python3 - "${DIST_DIR}" "${REPO_ROOT}/dist/submission.zip" <<'PY'
@@ -49,3 +54,4 @@ echo "Packaged:"
 echo "  ${DIST_DIR}"
 echo "  ${REPO_ROOT}/dist/submission.tar.gz"
 echo "  ${REPO_ROOT}/dist/submission.zip"
+echo "  source-only archive: judge rebuilds pass/runtime for its target"

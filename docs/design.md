@@ -32,6 +32,24 @@ Pass 使用 `LoopAnalysis` 获取 `LoopInfo`，只处理官方 `contest::block_c
 - 返回类型为 `i32`。
 - 参数数量为 4。
 
+### 语义 annotation
+
+提交包在 `src/baseline/block_cholesky.cpp` 的函数定义前增加唯一一条合法标注：
+
+```cpp
+[[clang::annotate("compiler2026.graph.block_cholesky.tile_dag.v1")]]
+```
+
+去掉该属性后，文件与官方 baseline 完全一致。`tile_dag.v1` 是版本化图区域契约：`L` 是
+row-major double 矩阵，`cholesky` 读写对角 tile，`trsm` 读取对角 tile 并读写其输出
+tile，`madd` 读取两个 panel tile 并读写输出 tile。它不包含矩阵规模、线程数、平台参数或
+测例信息。
+
+Pass 在克隆前从 `llvm.global.annotations` 识别该契约。默认 panel-local 路径继续使用原有
+GEP offset 恢复，不改变当前交付行为；仅在跨 panel 实验中，Pass 才依据契约用
+`operator_ptr - L_base` 恢复 element offset。这样即使 Clang 把原 GEP 链折叠进 PHI，仍能
+得到 `(block_row, block_col)`。标注缺失或版本不匹配时保守回退原分析。
+
 ### IR 版本化
 
 为了避免小 block 场景下任务提交开销超过计算收益，Pass 采用 IR 版本化：
@@ -139,6 +157,9 @@ extern "C" void compiler2026_runtime_submit_deps(
     void (*fn)(void *), void *ctx, int dep_a, int dep_b, int output);
 extern "C" void compiler2026_runtime_submit_deps3(
     void (*fn)(void *), void *ctx, int dep_a, int dep_b, int dep_c, int output);
+extern "C" void compiler2026_runtime_submit_deps3_priority(
+    void (*fn)(void *), void *ctx, int dep_a, int dep_b, int dep_c,
+    int output, int priority);
 extern "C" void compiler2026_runtime_wait();
 extern "C" void compiler2026_runtime_end();
 ```
@@ -150,6 +171,10 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - `runtime_submit` 只接收 task function 指针和 context 指针。
 - `runtime_submit_deps` 额外接收两个输入 block key 和一个输出 block key；runtime 用这些 key 维护 latest-producer 依赖和 ready queue，但不理解具体算子语义。
 - `runtime_submit_deps3` 是三输入依赖版本，用于实验性的跨 panel DAG：`madd` 需要同时依赖两个 `trsm` 输入和自身输出块的 previous producer。
+- `runtime_submit_deps3_priority` 是默认关闭的通用 rank 版本。Pass 按 tile 坐标计算
+  `0..3` 的关键路径等级；runtime 只按整数等级选择 ready queue，不读取算子名称或矩阵语义。
+  rank 使用 `uint8_t` 填入 `DagNode::completed` 后的 padding，64 位节点保持 40 B；开关
+  关闭时 enqueue/dequeue 直接走原 normal FIFO fast path。
 - `runtime_wait_key` 是实验性跨 panel 路径使用的通用 key wait：给定一个整数 block key，runtime 等待当前 latest producer 完成，等待期间主线程也会执行 ready queue 中的任务。存在 key waiter 时，worker 或提交线程完成 ready batch 后会通知 `done_cv`，避免 key wait 依赖固定超时轮询发现 producer 完成。它不理解 key 对应哪个算子或矩阵块。
 - 当前 panel-local DAG 下，Pass 对 `trsm` submit 保留 output key，对 `madd` submit 使用 output key `-1`。原因是 panel 末尾仍有 wait，`madd` 输出在当前 DAG 作用域内没有后续 async consumer；这样可以减少 runtime 对无消费者 `madd` 节点的 `latest_producer_` 哈希表更新。后续做跨 panel DAG 时，需要重新把相关 `madd` 输出纳入依赖图。
 - worker 线程从队列中取任务，调用 Pass 生成的 task function。
@@ -166,7 +191,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - runtime 根据 `b`、block 数和参与线程数选择小批量提交和批量出队策略：`b <= 64` 默认批量上限为 `8`，当 panel block 数相对线程数偏少时自动收窄批量，避免少量 ready task 被一次取走过多；`b > 128` 保持单任务粒度。
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
 - `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出 async path 判定次数和原因、任务数、队列等待时间、执行时间、worker idle 时间、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程在 `wait()` 中无 ready task 可执行的等待时间、批量出队信息、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/first-touch 输入依赖/释放批量/fanout/live 统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
-- smoke 和 benchmark 脚本都会把 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`、`COMPILER2026_DAG_MAX_LIVE`、`COMPILER2026_DAG_PIN_WORKERS` 透传给 contestant。benchmark 还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数；CSV 仍用 `threads` 字段区分记录，并用 `dag_pin_workers` 记录 worker 亲和性实验开关，输出目录按 `threads_<count>` 拆分，terminal summary 也按线程分组。benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV，包括 auto 模式下实际生效的 runtime batch 摘要。成功完成后默认删除大体量 per-suite 输入/输出/profile 目录，只保留 CSV、IR 和二进制；`COMPILER2026_BENCH_KEEP_ARTIFACTS=1` 可保留这些调试文件。
+- smoke 和 benchmark 脚本都会把 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`、`COMPILER2026_DAG_MAX_LIVE`、`COMPILER2026_DAG_PIN_WORKERS`、`COMPILER2026_DAG_CRITICAL_PRIORITY` 透传给 contestant。benchmark 还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数；CSV 仍用 `threads` 字段区分记录，并用 `dag_pin_workers` 记录 worker 亲和性实验开关，同时用 `pass_cross_panel_dag` 和 `pass_sync_cholesky` 固化两个决定 IR 的 Pass 开关。输出目录按 `threads_<count>` 拆分，terminal summary 也按线程分组。benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV，包括 auto 模式下实际生效的 runtime batch 摘要。成功完成后默认删除大体量 per-suite 输入/输出/profile 目录，只保留 CSV、IR 和二进制；`COMPILER2026_BENCH_KEEP_ARTIFACTS=1` 可保留这些调试文件。
 - `submission/scripts/tune_params.sh` 是 benchmark 的离线调参包装：它遍历 `COMPILER2026_TUNE_ASYNC_MIN_B_LIST`、`COMPILER2026_TUNE_ASYNC_MIN_BLOCKS_LIST`、`COMPILER2026_TUNE_TASK_BATCH_LIST`、`COMPILER2026_TUNE_DAG_MAX_LIVE_LIST` 和 `COMPILER2026_TUNE_DAG_PIN_WORKERS_LIST`，每个组合再交给 `benchmark.sh` 扫 `COMPILER2026_TUNE_THREAD_LIST`，最后汇总为一个 aggregate CSV。该脚本用于真实目标机事前 profile-guided 选择默认阈值、实验性 live-window 和 worker 亲和性，不参与 contestant 计时路径。
 
 Runtime 不包含 `trsm` / `madd` 专用 wrapper，也不直接封装具体算子语义。profile 名称只用于观测输出；ready-queue DAG 只看整数 block key 的 producer/consumer 关系。实际执行仍是调用 Pass 生成的 task function。官方 ABI 调用保留在 Pass 生成的 IR task function 中。`cholesky` 由优化后的 IR 保持原始同步调用。

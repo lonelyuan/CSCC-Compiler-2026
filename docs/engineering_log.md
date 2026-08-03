@@ -1146,3 +1146,88 @@
 
 - 删除 completed latest producer 虽然降低了 `max_dag_live`，但大量后续依赖会从 satisfied completed producer 变成 missing producer，破坏当前 profile 语义，也没有带来性能收益。
 - 代码改动已回退，只保留 CSV 和日志。后续如果要缩 producer 表，应单独维护 completed-producer cache 或 profile 语义，而不是直接 erase latest producer。
+
+## 2026-07-17 annotation-driven tile semantics and ranked ready queue experiment
+
+改动：
+
+- 在提交包的官方 baseline 副本上只增加函数级
+  `[[clang::annotate("compiler2026.graph.block_cholesky.tile_dag.v1")]]`；`main.cpp` 原样提供，
+  `block_cholesky.cpp` 去除该属性后与 SDK 官方文件一致。
+- `package.sh` 把 `src/baseline/` 放入提交包；smoke/benchmark 的 contestant IR 改由这份
+  annotated source 生成，串行对照仍编译 SDK 官方源码。
+- Pass 在克隆前读取 `llvm.global.annotations`。默认 panel-local 路径不变；跨 panel 实验
+  根据 `tile_dag.v1` 的 row-major double / `L` 基址契约，用 pointer difference 恢复
+  block 坐标，覆盖 Clang 把 GEP 链折叠成 PHI 的 IR。
+- 新增默认关闭的 `COMPILER2026_DAG_CRITICAL_PRIORITY=1`：Pass 为任务生成 `0..3` rank，
+  runtime 使用三个通用 priority FIFO 加普通 FIFO。对角更新/cholesky 为 rank 3，首个
+  subdiagonal trsm 为 rank 2，其余 trsm 和下一 panel 列更新为 rank 1，其余为 0。
+- rank 2/3 单任务出队以尽早释放关键链，rank 1 保留自适应 batch，避免所有 trsm 都按
+  batch 1 重新放大全局锁开销。runtime 仍只看整数依赖 key 和 rank，不理解算子名称。
+- `benchmark.sh` 新增 `dag_critical_priority`、`ir_submit_priority`、`priority_tasks`、
+  `priority_dequeue_batches` 和 `max_priority_ready` 字段，并记录决定 IR 的
+  `pass_cross_panel_dag`、`pass_sync_cholesky` 两个编译期开关。
+- rank 改用 `uint8_t` 填入 `DagNode::completed` 后的 padding，使 64 位 `DagNode`
+  保持原有 40 B；priority 关闭时 enqueue/dequeue 走直接 normal-queue fast path，避免
+  已判定无收益的实验扩大默认节点布局。
+
+本地验证：
+
+- 使用 Homebrew LLVM 20.1.3 构建 Pass/runtime 通过；同时修复 async internal clone 在新
+  verifier 下需要显式 `dso_local` 的兼容性问题。LLVM 15 原路径语义不变。
+- `llvm.global.annotations` 中确认存在 `tile_dag.v1`；默认 IR 无 priority submit，实验 IR
+  有 2 个静态 `submit_deps3_priority` call site。
+- `SPEC_START=93 SPEC_END=93` 的默认路径、sync-cross-panel 路径和 ranked-priority 路径均
+  通过本地 verifier。profile 中 ranked 路径执行 `priority_tasks=992`，说明 annotation、
+  Pass rank 和 runtime queue 已真正贯通。
+- `local_semantic_priority_schema_final.csv` 的四组 profile benchmark 通过；CSV 每行
+  均为 76 列，并验证 `tasks=main+worker`、`priority_tasks<=tasks`、
+  `max_priority_ready<=max_ready`。
+- 上述四份本机 CSV 已归档至 `docs/benchmark_results/`；新增配置字段后，新生成 CSV 为
+  76 列并带有明确的 cross-panel/sync-cholesky 配置值，文档不再依赖被 `.gitignore`
+  排除的 `build/` 文件。
+- 无 profile、4 线程、repeat=3：无 priority 跨 panel guard 为
+  `contestant_total=3.571598s speedup_geo=1.519x`；最终三级 rank + rank-1 batch 为
+  `contestant_total=3.720227s speedup_geo=1.414x`；默认 panel-local guard 为
+  `contestant_total=3.079379s speedup_geo=1.563x`。
+- 因此 priority 实验不默认启用。annotation 驱动的坐标恢复保留为跨 panel opt-in 的
+  IR 鲁棒性基础，后续更值得推进 bounded look-ahead 或 per-worker queue，而不是继续调整
+  单全局队列中的 rank 常量。
+- `bash -n submission/scripts/*.sh scripts/sync_to_vm.sh` 和 `git diff --check` 通过。
+
+限制：
+
+- 本轮结果来自本机 x86_64/LLVM 20，不是正式性能环境。
+- `./scripts/sync_to_vm.sh` 因当前账号缺少 `~/.ssh/bisheng_vm_ed25519` 失败；没有声称完成
+  openEuler aarch64 / BiSheng 15 benchmark 或打包复核。恢复 VM 密钥后应先跑默认 guard，
+  再决定是否值得在 48/64 核目标机重新评估 ranked queue。
+
+## 2026-08-03 source-only judge submission package
+
+交付修正：
+
+- 审计发现 macOS 上运行旧 `package.sh` 会把 Mach-O x86_64 Pass/runtime 复制到 ZIP；官方
+  manifest 又优先解析 `submission_dir`，会让这些宿主机产物遮蔽 judge 在 `build_dir` 中
+  重新生成的目标产物，因此这种 ZIP 不能提交。
+- `package.sh` 改为 source-only：仍先 clean/build 验证工程，但 ZIP 只携带 CMake、manifest、
+  Pass/runtime 源码、annotation baseline、脚本和文档，不预置 `.so/.a`。官方 judge 必须在
+  自己的目标环境构建，并由 manifest 回退到 `build_dir/pass` 和 `build_dir/runtime`。
+- Pass CMake 的自动查找列表补充 `llvm-config-16`、`llvm-config-15`。
+
+本机 LLVM 15.0.7 验证：
+
+- Pass/runtime clean build 通过，`opt -load-pass-plugin ... -passes=contestant-pass` 成功。
+- `SPEC_START=1 SPEC_END=150 COMPILER2026_DAG_THREADS=4` 的完整公开用例通过 verifier；
+  本机累计 `serial_seconds=15.140461`、`contestant_seconds=8.180619`。这些性能数字仅用于
+  运行链路检查，不作为 ARM 正式成绩。
+- 从最终 source-only ZIP 解压到空目录，使用 LLVM 15 独立 CMake 构建，再用解压出的
+  Pass/runtime 生成 contestant app；同一批 150 个公开用例再次通过 verifier。
+- 优化 IR 中确认 `compiler2026_task_trsm` / `compiler2026_task_madd` 仍分别调用官方
+  `@trsm` / `@madd`；ZIP CRC、根目录 `CMakeLists.txt`、manifest JSON、annotation 去除后
+  与官方 baseline 一致等检查均通过。
+
+限制：
+
+- 当前仍无法登录 `192.168.8.131`：专用 SSH key 不存在，现有 `id_rsa` 在握手阶段被服务端
+  关闭。因此本轮交付采用官方模板支持的 source-only 形式，已消除错误宿主二进制，但尚未
+  获得 openEuler aarch64 / BiSheng 15 的实机构建与 verifier 证据。

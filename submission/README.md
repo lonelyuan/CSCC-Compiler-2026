@@ -54,9 +54,9 @@ SPEC_START=93 SPEC_END=93 COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_PROFILE=1 
 `smoke_test.sh` passes `COMPILER2026_DAG_THREADS`,
 `COMPILER2026_DAG_PROFILE`, `COMPILER2026_TASK_BATCH`, and
 `COMPILER2026_ASYNC_MIN_B` / `COMPILER2026_ASYNC_MIN_BLOCKS`,
-`COMPILER2026_DAG_MAX_LIVE`, and `COMPILER2026_DAG_PIN_WORKERS` through to the
-contestant binary, so small verifier runs can exercise the same runtime knobs
-as benchmarks.
+`COMPILER2026_DAG_MAX_LIVE`, `COMPILER2026_DAG_PIN_WORKERS`, and the experimental
+`COMPILER2026_DAG_CRITICAL_PRIORITY` through to the contestant binary, so small
+verifier runs can exercise the same runtime knobs as benchmarks.
 
 When the same profile flag is used with `benchmark.sh`, parsed profile metrics
 are written into the benchmark CSV next to the timing fields. Cross-panel
@@ -130,6 +130,21 @@ to submit `trsm/madd` into the cross-panel DAG. This reduces extra cholesky
 tasks and remains opt-in until verifier and repeat benchmark data justify a
 default change.
 
+The packaged `src/baseline/block_cholesky.cpp` differs from the official source
+only by the allowed function annotation
+`compiler2026.graph.block_cholesky.tile_dag.v1`. In cross-panel experiments the
+Pass uses this versioned semantic contract to recover tile coordinates by
+subtracting operator pointers from the annotated row-major `L` base, so folded
+GEP/PHI address forms remain analyzable. The annotation contains no test size,
+thread count, platform parameter, or precomputed result.
+
+`COMPILER2026_DAG_CRITICAL_PRIORITY=1`, together with the cross-panel switch,
+enables an experimental Pass-computed rank: diagonal-chain tasks outrank the
+next-panel frontier, which outranks ordinary trailing updates. The runtime only
+sees integer ranks and generic dependency keys. This remains off by default;
+local LLVM 20 repeat tests did not beat the unprioritized cross-panel guard, and
+BiSheng/ARM evidence is still required.
+
 `COMPILER2026_DAG_PIN_WORKERS=1` is a Linux-only opt-in runtime experiment that
 pins worker threads to CPUs from the current process affinity mask. It is
 intended for target-platform NUMA/affinity testing and is off by default.
@@ -148,7 +163,10 @@ The package script writes both:
 - `dist/submission.zip`
 
 Both archives place `CMakeLists.txt` at archive root so the judge can run CMake
-directly on the extracted submission directory.
+directly on the extracted submission directory. They intentionally omit
+prebuilt `libcontestant_pass.so` and `libcontestant_runtime.a`: the official
+judge builds these into its own `build_dir`, which prevents a host binary from
+shadowing the target artifact under the manifest path-resolution order.
 
 Current implementation:
 
@@ -182,10 +200,19 @@ Current implementation:
 - `COMPILER2026_DAG_PIN_WORKERS=1` optionally pins runtime worker threads on
   Linux. The runtime reads the process affinity mask and ignores the request if
   pinning is unavailable.
+- The optional annotated baseline declares the `tile_dag.v1` graph-region
+  contract. It lets the cross-panel experiment recover coordinates from the
+  semantic `L` base even when optimized IR no longer retains a recursive GEP
+  chain. The default panel-local lowering still uses the established GEP path.
+- `COMPILER2026_DAG_CRITICAL_PRIORITY=1` enables a generic ranked ready-queue
+  experiment only for annotated cross-panel lowering; it is not a verified
+  default optimization.
 - `scripts/tune_params.sh` provides an offline wrapper around `benchmark.sh` for
   environment-specific threshold/batch/thread sweeps. Runtime defaults remain
   deterministic and cheap during contestant execution.
-- No source annotations are required.
+- No annotations are added to operator implementations, and the annotated
+  baseline is byte-for-byte identical to the official source after stripping
+  the one allowed function attribute.
 
 Documentation:
 

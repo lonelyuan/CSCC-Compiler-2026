@@ -27,6 +27,65 @@ VM 原始输出：
 
 四个 suite / 3 次重复的 speedup 几何平均约为 `1.657x`，总耗时 speedup 约为 `1.685x`，`contestant_total=1.769841s`。所有 contestant 输出均通过 verifier。该结果是当前 IR-level、官方 ABI 保留、panel-local ready queue DAG 路线下的有效性能记录；早期整函数替换路线的更高结果不作为当前提交方案。
 
+## 2026-07-17 annotation 关键路径实验（非正式本机结果）
+
+函数级 `tile_dag.v1` annotation 已能在 Clang/LLVM 20 `-O2` 后保留，并使跨 panel
+路径在 GEP 被折叠为 PHI 时仍通过 pointer-difference 恢复坐标。本机 x86_64、4 线程、
+无 profile、每组重复 3 次；两个跨 panel 候选使用 sync-cholesky 和
+`DAG_MAX_LIVE=2048`，默认 guard 使用 panel-local / `DAG_MAX_LIVE=0`。结果为：
+
+| 路径 | contestant total | speedup geo |
+| --- | ---: | ---: |
+| annotation 跨 panel，无 priority | 3.571598s | 1.519x |
+| annotation 三级 rank，rank-1 自适应 batch | 3.720227s | 1.414x |
+| annotation 默认 panel-local guard | 3.079379s | 1.563x |
+
+候选 priority 路径全部通过本地 verifier，但没有超过无 priority 的跨 panel 对照，也没有
+超过默认 panel-local guard，因此保持 `COMPILER2026_DAG_CRITICAL_PRIORITY=0`。这些数字来自
+本机 LLVM 20，不替代本文件开头的 openEuler aarch64 / BiSheng 15 正式记录；由于当前机器
+缺少 VM SSH 密钥，本轮尚无鲲鹏/VM 性能结论。原始 CSV 已归档为
+`docs/benchmark_results/local_semantic_crosspanel_guard_repeat3_final.csv`、
+`local_semantic_ranked_batch_repeat3_final.csv`、
+`local_annotation_default_guard_repeat3_final.csv` 和
+`local_semantic_priority_schema_final.csv`。CSV 显式记录了
+`pass_cross_panel_dag`、`pass_sync_cholesky`、`dag_critical_priority` 和 IR call-site
+计数，避免仅从 label 推断 Pass 配置。
+
+本机复现时使用 `/usr/local/opt/llvm` 的 LLVM 20.1.3、Unix Makefiles；设置
+`LLVM_CONFIG`、`CC`、`CXX`、`CLANG`、`OPT`、`LLVM_LINK`、`LLVM_DIS` 和
+`CMAKE_GENERATOR="Unix Makefiles"` 后，三组核心命令分别为：
+
+```bash
+export LLVM_CONFIG=/usr/local/opt/llvm/bin/llvm-config
+export CC=/usr/local/opt/llvm/bin/clang
+export CXX=/usr/local/opt/llvm/bin/clang++
+export CLANG=/usr/local/opt/llvm/bin/clang++
+export OPT=/usr/local/opt/llvm/bin/opt
+export LLVM_LINK=/usr/local/opt/llvm/bin/llvm-link
+export LLVM_DIS=/usr/local/opt/llvm/bin/llvm-dis
+export CMAKE_GENERATOR="Unix Makefiles"
+
+COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 \
+  COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_THREADS=4 \
+  COMPILER2026_DAG_CRITICAL_PRIORITY=0 REPEAT=3 \
+  LABEL=local_semantic_crosspanel_guard_repeat3_final ./submission/scripts/benchmark.sh
+
+COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 \
+  COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_THREADS=4 \
+  COMPILER2026_DAG_CRITICAL_PRIORITY=1 REPEAT=3 \
+  LABEL=local_semantic_ranked_batch_repeat3_final ./submission/scripts/benchmark.sh
+
+COMPILER2026_ENABLE_CROSS_PANEL_DAG=0 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=0 \
+  COMPILER2026_DAG_MAX_LIVE=0 COMPILER2026_DAG_THREADS=4 \
+  COMPILER2026_DAG_CRITICAL_PRIORITY=0 REPEAT=3 \
+  LABEL=local_annotation_default_guard_repeat3_final ./submission/scripts/benchmark.sh
+
+COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1 \
+  COMPILER2026_DAG_MAX_LIVE=2048 COMPILER2026_DAG_THREADS=4 \
+  COMPILER2026_DAG_CRITICAL_PRIORITY=1 COMPILER2026_DAG_PROFILE=1 REPEAT=1 \
+  LABEL=local_semantic_priority_schema_final ./submission/scripts/benchmark.sh
+```
+
 ## 本轮优化变化
 
 当前版本保留 IR-level 算子任务化路线，但做了以下 runtime/阈值优化：
@@ -51,6 +110,8 @@ VM 原始输出：
 - 新增 opt-in sync-cholesky cross-panel lowering：`COMPILER2026_ENABLE_CROSS_PANEL_DAG=1 COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` 时，Pass 保留原始同步 `cholesky` 调用，只在调用前插入 `runtime_wait_key` 等待 diagonal input 的 latest producer；`trsm/madd` 仍进入跨 panel DAG。该路径用于降低 cholesky task 化和完整跨 panel DAG live pressure，仍需 benchmark 证明后才可默认化。
 - `runtime_wait_key` 从固定 `10us` 超时轮询改为基于完成通知等待：存在 key waiter 时，ready batch 完成方会通知 `done_cv`，让 sync-cholesky 实验路径更快发现目标 key producer 已完成；默认 panel-local 路径没有 key waiter。
 - 新增 opt-in Linux worker pinning：`COMPILER2026_DAG_PIN_WORKERS=1` 时，runtime 会把 worker 绑定到当前进程 affinity mask 中的 CPU，用于真实目标机亲和性实验；默认关闭。
+- 提交包新增合法函数级 `tile_dag.v1` annotation；默认 panel-local 路径不变，跨 panel 实验可依据其 row-major `L` 语义通过 pointer difference 恢复被 PHI 折叠的地址坐标。
+- 新增默认关闭的 `COMPILER2026_DAG_CRITICAL_PRIORITY=1` 三级 rank 实验。它在本机 LLVM 20 重复测试中未超过无 priority 对照，因此不属于已验证性能提升。
 
 `b >= 16` 也做过实验，但在公开 benchmark 中触发段错误，已回退，不作为可交付配置。
 
@@ -70,7 +131,7 @@ cd /root/bisheng
 COMPILER2026_DAG_PROFILE=1 LABEL=ready_queue_profile_csv_smoke REPEAT=1 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh
 ```
 
-`smoke_test.sh` 和 `benchmark.sh` 都会透传 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`、`COMPILER2026_DAG_MAX_LIVE`、`COMPILER2026_DAG_PIN_WORKERS`。因此小范围 verifier smoke 可以直接验证 async 阈值、线程数、profile、batch、live-window 和 worker pinning 覆盖是否真实生效。
+`smoke_test.sh` 和 `benchmark.sh` 都会透传 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`、`COMPILER2026_DAG_MAX_LIVE`、`COMPILER2026_DAG_PIN_WORKERS`、`COMPILER2026_DAG_CRITICAL_PRIORITY`。因此小范围 verifier smoke 可以直接验证 async 阈值、线程数、profile、batch、live-window、worker pinning 和实验性关键路径 rank 是否真实生效。
 
 `benchmark.sh` 还支持用 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 在一次运行里扫描多个线程数。CSV 的 `threads` 字段区分每条记录，suite 输出目录按 `threads_<count>` 拆分，terminal summary 按线程分组输出 IR 计数、整体 speedup、speedup P50/P95、async decision 和 profile 摘要，避免不同线程数的结果被混合平均。未设置该变量时仍沿用单个 `COMPILER2026_DAG_THREADS`，默认值为 `4`。成功运行后，脚本默认删除 `${LABEL}` 下的大体量 per-suite 输入/输出/profile 目录，保留 `${LABEL}.csv`、`bin/` 和 `ir/`；需要排查单次输出时设置 `COMPILER2026_BENCH_KEEP_ARTIFACTS=1`。
 
