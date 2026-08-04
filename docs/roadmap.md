@@ -93,6 +93,8 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。`COMPILER2026_DAG_PIN_WORKERS=1` 提供默认关闭的 Linux worker 亲和性实验入口，可在真实目标机上和线程数、NUMA 绑定一起测试；后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA-aware placement。
 
+已有第一版 opt-in work-stealing 实验入口 `COMPILER2026_DAG_WORK_STEALING=1`：per-worker deque + 窃取，默认关闭，只服务默认 panel-barrier 调度，正确性已在 4 核 VM（毕昇 aarch64，verifier 通过、残差与 serial 一致）和本机 M5（ThreadSanitizer 无 data race、每 task 恰好执行一次）双重验证。本机 M5（10 核）调度 harness（`tools/sched_harness/`，链接真实 runtime、复刻 Cholesky DAG）显示：≤10 核、~6µs task 下中心队列锁尚未饱和，单队列的批量出队 + 主线程参与的动态负载均衡更廉价，work-stealing 在 4–10 线程反而慢于单队列（仅 2–3 线程因局部性更快）。因此 work-stealing 不切默认，作为面向鲲鹏 32+ 核的投资保留；生产版需要补 submit/exec overlap 与批量窃取，并在真实大核数平台上验证中心锁饱和点。
+
 ## 需要调研的方向
 
 优先调研以下关键词和系统：

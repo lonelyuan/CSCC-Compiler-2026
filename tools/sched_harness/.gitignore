@@ -1,0 +1,3 @@
+sched_bench
+sched_bench_tsan
+*.dSYM/

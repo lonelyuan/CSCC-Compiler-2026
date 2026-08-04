@@ -16,6 +16,7 @@
 │   ├── performance.md
 │   ├── roadmap.md
 │   ├── engineering_log.md
+│   ├── judge_automation.md
 │   └── benchmark_results/
 ├── submission/
 │   ├── CMakeLists.txt
@@ -52,12 +53,14 @@
 - `docs/performance.md`：性能实验结果和 CSV 路径。
 - `docs/roadmap.md`：面向真实鲲鹏多核平台和决赛扩展数据的长期优化路线。
 - `docs/engineering_log.md`：记录每轮优化的验证结果、经验教训和后续约束。
+- `docs/judge_automation.md`：提交前自动化、平台上传确认边界与云桌面协作约定。
 - `docs/benchmark_results/`：历史和当前 benchmark 结果。
 - 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
 - `contestant_sdk/`：官方 SDK、baseline、测试工具和公开 case。
 - `scripts/sync_to_vm.sh`：把本地工程同步到 openEuler/BiSheng 虚拟机。
 - `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
+- `tools/sched_harness/`：本机调度可行性 harness（仅调试用，不在 `submission/` 内，不影响评测包）。它链接真实 runtime 并复刻分块 Cholesky 任务 DAG，用于在本机多核（如 Apple M5）上验证跨 panel 调度与 work-stealing 的扩展性机制，弥补 4 核 VM 无法暴露大核数收益的限制。
 
 ## Codex Skill
 

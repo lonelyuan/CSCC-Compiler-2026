@@ -159,6 +159,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - ready queue、DAG node vector、latest-producer 表和批量提交状态的 reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - `COMPILER2026_DAG_PIN_WORKERS=1` 是默认关闭的 Linux worker 亲和性实验：runtime 从当前进程 affinity mask 读取可用 CPU，并把 worker thread 轮转绑定到这些 CPU；非 Linux 或 affinity 读取失败时自动退化为不绑定。该机制只影响线程放置，不改变 DAG 依赖、ready queue 或 task function。
+- `COMPILER2026_DAG_WORK_STEALING=1` 是默认关闭的 per-worker deque + work-stealing 实验路径：DAG 在提交阶段单线程构建，drain 阶段用 per-node 原子 pending 计数、不可变 successor 边和分片 deque（本地 LIFO 批量出队 + 跨 shard FIFO 窃取），空闲时有界自旋后 CV 睡眠并以 push 序号防丢唤醒，终止用单原子 outstanding 计数。它只服务默认 panel-barrier 调度；与跨 panel `runtime_wait_key` 同时启用时，`wait_key` 退化为一次完整 drain（保守正确）。默认关闭时全部走原单全局队列路径，逐字不变。当前本机 M5 与 4 核 VM 上未超过单队列默认（中心队列锁在 ≤10 核、~6µs task 下尚未饱和），保留为面向真实鲲鹏大核数平台的实验入口，详见 `docs/engineering_log.md` 与 `tools/sched_harness/`。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 - runtime 按首个 panel 的 `trsm + madd` 任务数预估 panel-local task 容量，并复用 ready queue、DAG node vector 和 latest-producer hash table 的容量。
 - DAG successor 边使用 runtime 统一的连续 edge pool；每个 producer node 只保存 successor 链表的 head/tail 和计数，避免为高 fanout `trsm` producer 维护大量独立小 vector。

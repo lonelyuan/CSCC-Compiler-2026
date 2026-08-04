@@ -1146,3 +1146,31 @@
 
 - 删除 completed latest producer 虽然降低了 `max_dag_live`，但大量后续依赖会从 satisfied completed producer 变成 missing producer，破坏当前 profile 语义，也没有带来性能收益。
 - 代码改动已回退，只保留 CSV 和日志。后续如果要缩 producer 表，应单独维护 completed-producer cache 或 profile 语义，而不是直接 erase latest producer。
+
+## 2026-06-08 宿主机调度可行性 harness + 跨 panel/work-stealing 多核研究
+
+背景：
+
+- 4-vCPU VM 无法暴露大核数调度收益。本轮在本机 Apple M5（10 核：4 P + 6 E）上做调度机制可行性验证，目标是回答“最大优化（跨 panel DAG 去 panel barrier）和 work-stealing 在核数大于 4 时是否成立”，因为 4 核平台结构上看不到收益。
+- 真实测试平台（鲲鹏 920 48/64 核）后续开放；M5 是 ARM 同 ISA 但 macOS/Apple clang、无毕昇/SDK，且 P/E 异构、核数仍远小于鲲鹏。结论只作为调度机制可行性证据，不作为正式性能事实。
+
+改动：
+
+- 新增本机调度 harness `tools/sched_harness/sched_bench.cpp`（仅调试用，不在 `submission/`，不影响评测包）。它直接链接真实 `submission/runtime/dag_runtime.cpp`，按 Pass 的依赖键复刻分块 Cholesky 的 panel-barrier 与 cross-panel(sync-cholesky) 任务 DAG，使用真实 `b×b` 块计算（b=32 时每个 madd 约 6µs，与 VM profile 同量级），通过真实 runtime API 跑 1..10 线程扫描。harness 自带正确性闸：每次运行校验“每个 task 恰好执行一次”和块 checksum 稳定。
+- runtime 新增 opt-in `COMPILER2026_DAG_WORK_STEALING=1`：per-worker deque + work stealing，默认关闭。设计约束：DAG 在提交阶段单线程构建（worker 全部 park），drain 阶段只改 per-node 原子 pending 计数和分片 deque（successor 边在 drain 期间不可变），终止用单个原子 outstanding 计数归零；空闲采用“有界自旋后 CV 睡眠 + push 序号防丢唤醒”。该路径仅服务默认 panel-barrier 调度；与 cross-panel `wait_key` 不兼容时退化为一次完整 drain（保守正确）。默认路径（WS 关闭）代码逐字不变。
+
+经验（本机 M5，单位为同一 harness 下的 wall ms 比值，非 VM/鲲鹏性能事实）：
+
+- 跨 panel DAG 收益随核数单调增长，并满足 `收益 ∝ 核数 / 每矩阵 block 数`：64 blocks(n=2048) 10 线程 `cross/bar≈0.98`（基本持平，核数≪blocks）；32 blocks(n=1024) 10 线程 `0.886`（cross 快约 11%）；16 blocks(n=512) 10 线程 `≈0.85`（快约 15%）。1–2 线程处处持平。这解释了 4 核 VM 上跨 panel 必然看不到收益且会被开销拖成回退，并预测鲲鹏 48/64 核（核数≳block 数的公开/中等矩阵）跨 panel 收益显著。
+- work-stealing 原型：2–3 线程更快（局部性 + 无全局锁，`WS/SQ≈0.74–0.94`），但 4–10 线程慢于已调优的单全局队列（`WS/SQ≈1.2–1.5`）。依次尝试阻塞式空闲、push 序号精确唤醒、分片批量出队三项公平性修正后结论不变。原因：≤10 核、~6µs task 下中心队列锁尚未饱和，单队列的批量出队 + 主线程参与带来的动态负载均衡更廉价；WS 还损失了 panel 内 submit/exec overlap，并有窃取不均衡开销。work-stealing 的收益要等中心锁真正饱和（更高核数或更细 task），这正是鲲鹏区间。
+
+结论与方向：
+
+- 近期多核扩展性应优先做跨 panel DAG（同一 M5 上已显示随核数增长的真实收益），work-stealing 作为更高核数（32+）的投资，且生产版需要 submit/exec overlap 与批量窃取才可能在中等核数追平中心队列。
+- work-stealing 保持 opt-in/默认关闭的实验形态，性能待真实鲲鹏验证；不切默认。
+
+验证：
+
+- 本机：`clang++ -std=c++17 -O2 -pthread` 链接 runtime + harness 通过；ThreadSanitizer 构建（`-fsanitize=thread`）下 WS 路径无 data race 警告，正确性闸 `exec=tasks` 且 checksum 与单队列一致。
+- VM（openEuler aarch64 / 毕昇 LLVM 15.0.4，4 核）：`./submission/scripts/build.sh` 通过；默认路径 `SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh` verifier 通过 speedup `1.821x`（与历史一致，默认未受影响）；`COMPILER2026_DAG_WORK_STEALING=1` 同范围 verifier 通过 speedup `1.836x`，单 case profile `status=PASS scaled_residual=0.00129281`，与 serial 残差完全一致。
+- 早期同会话跨 panel 对照（4 核 VM、本会话 serial 波动下默认 geomean `1.558x`）：taskized cross-panel `1.489x`、sync-cholesky+live2048 `1.504x`，均低于默认，符合“4 核看不到跨 panel 收益”的预期。
