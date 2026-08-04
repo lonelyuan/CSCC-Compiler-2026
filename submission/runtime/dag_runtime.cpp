@@ -1298,7 +1298,14 @@ std::size_t resolveThreadCount(int n, int b) {
 }
 
 int asyncMinBlockSize() {
-    int threshold = 18;
+    // Measured crossover, not a guess: on a 40-physical-core host the aggregate
+    // public-suite geomean improves from 1.926x to 2.250x when this drops from
+    // 18 to 16, stays flat at 12, and collapses to 1.487x at 8 where per-task
+    // overhead exceeds the 2*b^3 flops a single madd carries. 16 is also the
+    // conservative direction for the aarch64 target: its narrower vector units
+    // make each tile task longer, so a threshold that pays off where tasks are
+    // shortest also pays off there.
+    int threshold = 16;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
         char *end = nullptr;
         const long configured = std::strtol(env, &end, 10);

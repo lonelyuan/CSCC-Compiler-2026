@@ -67,7 +67,7 @@ else
     run original serial IR path;
 ```
 
-默认 predicate 仍使用 `b >= 18`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
+默认 predicate 使用 `b >= 16`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
 
 async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
@@ -222,7 +222,7 @@ Pass 和 runtime 当前共同保证：
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 提供跨 panel DAG 实验入口；`COMPILER2026_DAG_MAX_LIVE` 能限制 live DAG 压力，`COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` 能减少 cholesky task 化开销，但当前单全局队列和完整跨 panel 依赖维护在 4 vCPU VM 上仍需 benchmark 证明后才可默认化。
 - block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；Pass 会先用 `n` / `b` 从 element offset 恢复 block row/col，再组合成 runtime 现有的一维 key。如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
-- 当前默认异步阈值 `b >= 18` 和最小 block 数 2 是公开 4 vCPU VM benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，仍不作为默认。
+- 当前默认异步阈值 `b >= 16` 来自 40 物理核平台上的阈值扫描：18 → 16 使公开四 suite 聚合 geomean 由 `1.926x` 升到 `2.250x`（16 线程），12 与 16 持平，8 回退到 `1.487x`。历史记录的"`b >= 16` 触发段错误"在当前代码上未复现，三档阈值各 39/39 verifier PASS。最小 block 数 2 仍是经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，离线 sweep wrapper 已能生成跨阈值、batch 和线程数的 aggregate CSV，但 runtime 尚未把历史 profile 自动反馈成下一次默认策略。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 
