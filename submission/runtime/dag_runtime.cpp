@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -1272,6 +1274,43 @@ private:
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;
 
+// Sustainable participant count for a b x b tile task, independent of how much
+// parallelism the DAG exposes. Adding participants past this point makes the
+// shared ready queue the bottleneck and actively loses throughput.
+//
+// Measured per-case optima on a 40-physical-core host, sweeping thread counts
+// with the cap disabled (best of 3 per point):
+//   b=18 B=64 -> 8 threads 4.20x, 40 threads 1.62x  (-61%)
+//   b=24 B=48 -> 16 threads 8.08x, 40 threads 3.57x (-56%)
+//   b=32 B=36 -> 16 threads 9.73x, 40 threads 6.48x (-33%)
+//   b=32 B=64 -> 24 threads 15.70x, 40 threads 9.90x (-37%)
+//   b=64 B=16 and b=96 B=8 already sit under the block-count cap, -1%.
+// The optimum tracks b roughly linearly over that range, which `b - 8`
+// reproduces: 18->10, 24->16, 32->24, and no cap from b=48 up.
+//
+// PLATFORM CAVEAT: the constant encodes this host's lock throughput relative to
+// tile task duration. The aarch64 target has narrower vector units, so the same
+// b yields a longer task and a genuinely higher sustainable count; this default
+// therefore under-provisions there, costing throughput but never correctness.
+// Re-measure with COMPILER2026_DAG_PARTICIPANT_CAP=off before trusting it as a
+// tuned value on a new platform.
+std::size_t participantCapForTile(int b) {
+    if (const char *env = std::getenv("COMPILER2026_DAG_PARTICIPANT_CAP")) {
+        if (std::strcmp(env, "off") == 0 || std::strcmp(env, "none") == 0) {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            return static_cast<std::size_t>(configured);
+        }
+    }
+    if (b <= 12) {
+        return 4;
+    }
+    return static_cast<std::size_t>(b - 8);
+}
+
 std::size_t resolveThreadCount(int n, int b) {
     std::size_t threads = std::thread::hardware_concurrency();
     if (threads == 0) {
@@ -1294,7 +1333,12 @@ std::size_t resolveThreadCount(int n, int b) {
     if (block_count <= 1) {
         return 1;
     }
-    return std::max<std::size_t>(1, std::min<std::size_t>(threads, block_count));
+    // Two independent bounds: the DAG cannot use more participants than it has
+    // blocks, and the shared queue cannot sustain more than the tile
+    // granularity allows.
+    const std::size_t by_blocks =
+        std::min<std::size_t>(threads, static_cast<std::size_t>(block_count));
+    return std::max<std::size_t>(1, std::min(by_blocks, participantCapForTile(b)));
 }
 
 int asyncMinBlockSize() {
