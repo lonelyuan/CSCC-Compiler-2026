@@ -67,7 +67,7 @@ else
     run original serial IR path;
 ```
 
-默认 predicate 仍使用 `b >= 18`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
+默认 predicate 使用 `b >= 12`、block 数大于等于 2 且可用线程数大于 1；`COMPILER2026_ASYNC_MIN_B` 和 `COMPILER2026_ASYNC_MIN_BLOCKS` 可以覆盖阈值，用于 smoke/profile/benchmark 调参。
 
 async clone 是从官方 baseline IR 克隆出来的，不是手写算法替换。
 
@@ -182,13 +182,16 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - 当前 DAG 作用域是 panel-local；`wait` 确认 DAG 节点全部完成后会清理已完成节点和 latest-producer 表，profile 计数保留到 `end` 汇报。
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
 - ready queue、DAG node vector、latest-producer 表和批量提交状态的 reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
+- 依赖释放和 submit flush 使用 `notifyWorkers(count)` 定向唤醒：按新就绪任务数调用相应次数 `notify_one`，只有 `count` 不小于 worker 数时才退化为 `notify_all`，避免每次释放事件产生 O(participants) 次无效 futex 唤醒。停机路径仍使用 `notify_all`。欠唤醒是安全的：每个参与者完成一批后都会重新求值就绪谓词。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - `COMPILER2026_DAG_PIN_WORKERS=1` 是默认关闭的 Linux worker 亲和性实验：runtime 从当前进程 affinity mask 读取可用 CPU，并把 worker thread 轮转绑定到这些 CPU；非 Linux 或 affinity 读取失败时自动退化为不绑定。该机制只影响线程放置，不改变 DAG 依赖、ready queue 或 task function。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 - runtime 按首个 panel 的 `trsm + madd` 任务数预估 panel-local task 容量，并复用 ready queue、DAG node vector 和 latest-producer hash table 的容量。
 - DAG successor 边使用 runtime 统一的连续 edge pool；每个 producer node 只保存 successor 链表的 head/tail 和计数，避免为高 fanout `trsm` producer 维护大量独立小 vector。
 - `COMPILER2026_DAG_MAX_LIVE` 是默认关闭的 live-window drain：非零时，DAG submit 发现 live DAG 数量超过窗口且已有 ready task，会由提交线程执行一小批 ready task 后继续提交。该机制只看通用 DAG 状态，不包含算子特化逻辑，主要用于跨 panel DAG 实验降低完整图的 live pressure。
-- runtime 根据 `b`、block 数和参与线程数选择小批量提交和批量出队策略：`b <= 64` 默认批量上限为 `8`，当 panel block 数相对线程数偏少时自动收窄批量，避免少量 ready task 被一次取走过多；`b > 128` 保持单任务粒度。
+- 依赖感知的 submit 采用"提交者暂存 + 批量发布"：依赖键解析、去重和输出键登记在临界区外完成（`dag_nodes_`、`successor_edges_`、`latest_producer_` 只有提交线程追加），`flushDagStaging()` 在一次加锁内按"先追加全部节点 → 再连全部边 → 最后入队就绪节点"的顺序发布。批量大小为 `reserve_tasks / (participants * 2)`，上限 32，`COMPILER2026_DAG_SUBMIT_BATCH` 可覆盖；block 数少时自动退回逐个发布。这解决了"单线程提交者与 N 个 worker 争同一把锁"导致的队列饥饿正反馈。
+- 参与者数由两个独立的界共同决定：`min(可用线程, block 数, participantCapForTile(b))`。后者是共享队列在给定 tile 粒度下的可持续吞吐界（`b <= 12 → 4`，否则 `b - 8`），`COMPILER2026_DAG_PARTICIPANT_CAP` 可覆盖（正整数强制、`off` 关闭）。该常数是平台相关的，换平台需重测。
+- 批量出队大小只按 tile 粒度选择（`b <= 64 → 8`，`b <= 128 → 4`，更大 → 1）；公平性由 `chooseBatchCount()` 动态保证——ready 宽度不足时返回 1，否则最多发放 `available / participants`。此前基于 block 数的静态钳制已移除，因为它在参与者数接近 block 数时会错误地把批量压成 1。
 - `COMPILER2026_TASK_BATCH` 可覆盖默认批量大小，用于真实多核平台调参。
 - `COMPILER2026_DAG_PROFILE=1` 打开轻量 profiling，向 stderr 输出 async path 判定次数和原因、任务数、队列等待时间、执行时间、worker idle 时间、`wait()` 调用次数和总耗时、`wait()` 入口 ready/active/DAG live pressure、主线程在 `wait()` 中无 ready task 可执行的等待时间、批量出队信息、ready queue 宽度采样、DAG 节点/边/已满足依赖/缺失依赖/first-touch 输入依赖/释放批量/fanout/live 统计，以及按已注册 task 名称聚合的 `trsm/madd` 统计。
 - smoke 和 benchmark 脚本都会把 `COMPILER2026_DAG_THREADS`、`COMPILER2026_DAG_PROFILE`、`COMPILER2026_TASK_BATCH`、`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS`、`COMPILER2026_DAG_MAX_LIVE`、`COMPILER2026_DAG_PIN_WORKERS`、`COMPILER2026_DAG_CRITICAL_PRIORITY` 透传给 contestant。benchmark 还支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 一次扫描多个线程数；CSV 仍用 `threads` 字段区分记录，并用 `dag_pin_workers` 记录 worker 亲和性实验开关，同时用 `pass_cross_panel_dag` 和 `pass_sync_cholesky` 固化两个决定 IR 的 Pass 开关。输出目录按 `threads_<count>` 拆分，terminal summary 也按线程分组。benchmark 脚本会在打开 `COMPILER2026_DAG_PROFILE=1` 时捕获这些 stderr profile 行，并把解析后的 profile 字段写入 benchmark CSV，包括 auto 模式下实际生效的 runtime batch 摘要。成功完成后默认删除大体量 per-suite 输入/输出/profile 目录，只保留 CSV、IR 和二进制；`COMPILER2026_BENCH_KEEP_ARTIFACTS=1` 可保留这些调试文件。
@@ -221,7 +224,7 @@ Pass 和 runtime 当前共同保证：
 - 当前版本仍保留 panel 末尾 barrier，不是完整跨 panel 异步 DAG。
 - `COMPILER2026_ENABLE_CROSS_PANEL_DAG=1` 提供跨 panel DAG 实验入口；`COMPILER2026_DAG_MAX_LIVE` 能限制 live DAG 压力，`COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY=1` 能减少 cholesky task 化开销，但当前单全局队列和完整跨 panel 依赖维护在 4 vCPU VM 上仍需 benchmark 证明后才可默认化。
 - block key 恢复当前支持 strip pointer casts 后的一维 `GEPOperator`，并能递归累加嵌套一维 GEP offset；Pass 会先用 `n` / `b` 从 element offset 恢复 block row/col，再组合成 runtime 现有的一维 key。如果后续 IR 形态变化到多维或无法线性化的地址表达式，Pass 会回退到原 submit/wait 路径。
-- 当前默认异步阈值 `b >= 18` 和最小 block 数 2 是公开 4 vCPU VM benchmark 上的经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖，`b >= 16` 实验触发过段错误，仍不作为默认。
+- 当前默认异步阈值 `b >= 16` 来自 40 物理核平台上的阈值扫描：18 → 16 使公开四 suite 聚合 geomean 由 `1.926x` 升到 `2.250x`（16 线程），12 与 16 持平，8 回退到 `1.487x`。历史记录的"`b >= 16` 触发段错误"在当前代码上未复现，三档阈值各 39/39 verifier PASS。最小 block 数 2 仍是经验值；`COMPILER2026_ASYNC_MIN_B`、`COMPILER2026_ASYNC_MIN_BLOCKS` 可用于实验覆盖。
 - 当前 task 批量策略仍是 runtime heuristic；profile 数据已经可观测，离线 sweep wrapper 已能生成跨阈值、batch 和线程数的 aggregate CSV，但 runtime 尚未把历史 profile 自动反馈成下一次默认策略。
 - 小 block serial path 能保证不因任务过细而严重退化，但当前 VM 上仍有少量版本化分支开销。
 

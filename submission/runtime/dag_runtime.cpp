@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -27,6 +29,11 @@ namespace {
 using TaskFn = void (*)(void *);
 constexpr std::size_t kMaxTaskBatch = 16;
 constexpr std::size_t kMaxProfiledTasks = 8;
+// Upper bound on how many dependency-aware submits the submitting thread may
+// stage before publishing them under one lock acquisition.
+constexpr std::size_t kMaxDagSubmitBatch = 32;
+// Widest dependency list the runtime API exposes (submit_deps3*).
+constexpr std::size_t kMaxDeps = 3;
 
 using Clock = std::chrono::steady_clock;
 
@@ -49,6 +56,21 @@ bool workerPinningEnabledFromEnv() {
 bool criticalPriorityEnabledFromEnv() {
     const char *env = std::getenv("COMPILER2026_DAG_CRITICAL_PRIORITY");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+// 0 means "let the runtime size the submit batch from the problem shape".
+std::size_t dagSubmitBatchOverride() {
+    static const std::size_t value = []() -> std::size_t {
+        if (const char *env = std::getenv("COMPILER2026_DAG_SUBMIT_BATCH")) {
+            char *end = nullptr;
+            const unsigned long configured = std::strtoul(env, &end, 10);
+            if (end != env && *end == '\0') {
+                return static_cast<std::size_t>(configured);
+            }
+        }
+        return 0;
+    }();
+    return value;
 }
 
 std::vector<int> allowedCpuList() {
@@ -108,6 +130,24 @@ class AsyncRuntime {
         int successor = -1;
         int next = -1;
     };
+
+    // One dependency-aware submit held back by the submitting thread until the
+    // staging buffer is published. Dependency keys are resolved to producer
+    // node indices here, outside the runtime mutex, because latest_producer_
+    // and the node/edge vectors are only ever appended to by the submitter.
+    struct StagedSubmit {
+        TaskFn fn = nullptr;
+        void *context = nullptr;
+        std::uint8_t priority = 0;
+        std::size_t dep_count = 0;
+        // Per dep: >= 0 producer node index, kDepSkip when the dep was
+        // negative or a duplicate, kDepMissing when no live producer exists.
+        std::array<int, kMaxDeps> dep_nodes{};
+        std::array<bool, kMaxDeps> dep_first_touch{};
+    };
+
+    static constexpr int kDepSkip = -1;
+    static constexpr int kDepMissing = -2;
 
 public:
     explicit AsyncRuntime(std::size_t worker_count)
@@ -198,7 +238,28 @@ public:
         pending_count_ = 0;
         task_batch_size_ = std::max<std::size_t>(
             1, std::min<std::size_t>(task_batch_size, kMaxTaskBatch));
+        dag_staging_.clear();
+        dag_next_node_index_ = 0;
+        dag_staging_limit_ = chooseDagStagingLimit(reserve_tasks);
+        dag_staging_.reserve(dag_staging_limit_);
         worker_error_ = nullptr;
+    }
+
+    // How many dependency-aware submits to withhold before publishing them
+    // under one lock. Withholding trades a small publish delay for a large cut
+    // in submitter lock acquisitions, so it is only worth doing when the DAG
+    // holds clearly more ready work than the pool drains while a batch is being
+    // staged. Small block counts fall back to publish-per-submit.
+    std::size_t chooseDagStagingLimit(std::size_t reserve_tasks) const {
+        if (const std::size_t configured = dagSubmitBatchOverride()) {
+            return std::min(configured, kMaxDagSubmitBatch);
+        }
+        const std::size_t participants = workers_.size() + 1;
+        if (participants <= 1) {
+            return 1;
+        }
+        const std::size_t budget = reserve_tasks / (participants * 2);
+        return std::max<std::size_t>(1, std::min(budget, kMaxDagSubmitBatch));
     }
 
     void submit(TaskFn fn, void *context) {
@@ -239,50 +300,128 @@ public:
             return;
         }
 
-        bool should_notify = false;
+        // Stage outside the runtime mutex. Resolving dependency keys is the
+        // expensive part (hash lookups) and touches only submitter-private
+        // state, so it must not sit inside the critical section that every
+        // worker contends for on dequeue and completion.
+        StagedSubmit staged;
+        staged.fn = fn;
+        staged.context = context;
+        staged.priority = task_priority;
+        staged.dep_count = std::min(dep_count, kMaxDeps);
+
+        const int node_index =
+            static_cast<int>(dag_next_node_index_ + dag_staging_.size());
+
+        for (std::size_t i = 0; i < staged.dep_count; ++i) {
+            const int dep = deps[i];
+            staged.dep_nodes[i] = kDepSkip;
+            staged.dep_first_touch[i] = false;
+            if (dep < 0) {
+                continue;
+            }
+
+            bool duplicate = false;
+            for (std::size_t prev = 0; prev < i; ++prev) {
+                if (deps[prev] == dep) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+
+            auto producer = latest_producer_.find(dep);
+            if (producer == latest_producer_.end()) {
+                staged.dep_nodes[i] = kDepMissing;
+                if (profiling) {
+                    staged.dep_first_touch[i] =
+                        profile_output_keys_.find(dep) == profile_output_keys_.end();
+                }
+                continue;
+            }
+            staged.dep_nodes[i] = producer->second;
+        }
+
+        // A producer recorded here may still be staged rather than published.
+        // That is fine: an unpublished node cannot be completed, so the wiring
+        // pass below always turns it into a real edge.
+        if (output >= 0) {
+            latest_producer_[output] = node_index;
+            if (profiling) {
+                profile_output_keys_.insert(output);
+            }
+        }
+
+        dag_staging_.push_back(staged);
+        if (dag_staging_.size() >= dag_staging_limit_) {
+            flushDagStaging();
+        }
+
+        if (max_live_window_ != 0) {
+            flushDagStaging();
+            drainReadyTasksForLiveWindow();
+        }
+    }
+
+    // Publish every staged submit under a single lock acquisition. Order inside
+    // the critical section matters: append all nodes first so same-batch
+    // producer indices are valid, then wire edges, and only then enqueue the
+    // ready nodes. Enqueuing earlier would let a worker complete a same-batch
+    // producer before its successor edge exists and lose the dependency.
+    void flushDagStaging() {
+        if (dag_staging_.empty()) {
+            return;
+        }
+
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        const std::size_t staged_count = dag_staging_.size();
+        std::size_t ready_count = 0;
+        bool has_priority_ready = false;
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const int node_index = static_cast<int>(dag_nodes_.size());
-            dag_nodes_.push_back(
-                {fn, context, 0, false, task_priority, -1, -1, 0});
-            ++pending_dag_tasks_;
+            const std::size_t base = dag_nodes_.size();
+            for (const StagedSubmit &entry : dag_staging_) {
+                dag_nodes_.push_back(
+                    {entry.fn, entry.context, 0, false, entry.priority, -1, -1, 0});
+            }
+            pending_dag_tasks_ += staged_count;
             if (profiling) {
-                ++profile_dag_nodes_;
+                profile_dag_nodes_ += staged_count;
                 max_dag_live_ = std::max(max_dag_live_, pending_dag_tasks_);
             }
 
-            for (std::size_t i = 0; i < dep_count; ++i) {
-                const int dep = deps[i];
-                if (dep < 0) {
-                    continue;
-                }
-
-                bool duplicate = false;
-                for (std::size_t prev = 0; prev < i; ++prev) {
-                    if (deps[prev] == dep) {
-                        duplicate = true;
-                        break;
+            for (std::size_t s = 0; s < staged_count; ++s) {
+                const StagedSubmit &entry = dag_staging_[s];
+                const int successor_index = static_cast<int>(base + s);
+                for (std::size_t i = 0; i < entry.dep_count; ++i) {
+                    const int producer_index = entry.dep_nodes[i];
+                    if (producer_index == kDepSkip) {
+                        continue;
                     }
-                }
-                if (duplicate) {
-                    continue;
-                }
-
-                auto producer = latest_producer_.find(dep);
-                if (producer == latest_producer_.end()) {
-                    if (profiling) {
-                        ++profile_dag_missing_deps_;
-                        if (profile_output_keys_.find(dep) == profile_output_keys_.end()) {
-                            ++profile_dag_first_touch_deps_;
+                    if (producer_index == kDepMissing) {
+                        if (profiling) {
+                            ++profile_dag_missing_deps_;
+                            if (entry.dep_first_touch[i]) {
+                                ++profile_dag_first_touch_deps_;
+                            }
                         }
+                        continue;
                     }
-                    continue;
-                }
 
-                DagNode &producer_node = dag_nodes_[producer->second];
-                if (!producer_node.completed) {
+                    DagNode &producer_node =
+                        dag_nodes_[static_cast<std::size_t>(producer_index)];
+                    if (producer_node.completed) {
+                        if (profiling) {
+                            ++profile_dag_satisfied_deps_;
+                        }
+                        continue;
+                    }
+
                     const int edge_index = static_cast<int>(successor_edges_.size());
-                    successor_edges_.push_back({node_index, -1});
+                    successor_edges_.push_back({successor_index, -1});
                     if (producer_node.last_successor >= 0) {
                         successor_edges_[static_cast<std::size_t>(
                                              producer_node.last_successor)]
@@ -292,48 +431,47 @@ public:
                     }
                     producer_node.last_successor = edge_index;
                     ++producer_node.successor_count;
-                    ++dag_nodes_[node_index].pending;
+                    ++dag_nodes_[static_cast<std::size_t>(successor_index)].pending;
                     if (profiling) {
                         ++profile_dag_edges_;
                         max_dag_successors_ =
                             std::max(max_dag_successors_, producer_node.successor_count);
                     }
-                } else if (profiling) {
-                    ++profile_dag_satisfied_deps_;
                 }
-            }
 
-            if (profiling) {
-                max_dag_pending_ =
-                    std::max(max_dag_pending_,
-                             static_cast<std::size_t>(dag_nodes_[node_index].pending));
-            }
-
-            if (output >= 0) {
-                latest_producer_[output] = node_index;
                 if (profiling) {
-                    profile_output_keys_.insert(output);
+                    max_dag_pending_ = std::max(
+                        max_dag_pending_,
+                        static_cast<std::size_t>(
+                            dag_nodes_[static_cast<std::size_t>(successor_index)]
+                                .pending));
                 }
             }
 
-            if (dag_nodes_[node_index].pending == 0) {
-                enqueueTaskLocked(
-                    {fn, context, profiling ? nowNs() : 0, node_index,
-                     task_priority});
+            for (std::size_t s = 0; s < staged_count; ++s) {
+                const std::size_t node = base + s;
+                if (dag_nodes_[node].pending != 0) {
+                    continue;
+                }
+                const StagedSubmit &entry = dag_staging_[s];
+                enqueueTaskLocked({entry.fn, entry.context,
+                                   profiling ? nowNs() : 0, static_cast<int>(node),
+                                   entry.priority});
+                ++ready_count;
+                has_priority_ready = has_priority_ready || entry.priority > 0;
                 if (profiling) {
                     ++profile_dag_initial_ready_;
                 }
-                should_notify =
-                    task_priority > 0 || readyTaskCountLocked() <= workers_.size();
             }
         }
 
-        if (should_notify) {
+        dag_next_node_index_ += staged_count;
+        dag_staging_.clear();
+
+        if (has_priority_ready) {
             work_cv_.notify_one();
         }
-        if (max_live_window_ != 0) {
-            drainReadyTasksForLiveWindow();
-        }
+        notifyWorkers(ready_count);
     }
 
     void enqueueTask(Task task) {
@@ -362,6 +500,26 @@ public:
         void *memory = chunks_.back().get() + chunk_offset_;
         chunk_offset_ += aligned_size;
         return memory;
+    }
+
+    // Wake at most one worker per newly ready task instead of storming the
+    // whole pool. notify_all costs O(participants) futex wakeups per release
+    // event while at most `count` of the woken threads can find work; the rest
+    // re-acquire the shared mutex only to re-check the predicate and park
+    // again. Under-waking is safe: every participant re-evaluates
+    // hasReadyTasksLocked() after finishing a batch, and submit-side flushes
+    // notify independently.
+    void notifyWorkers(std::size_t count) {
+        if (count == 0) {
+            return;
+        }
+        if (count >= workers_.size()) {
+            work_cv_.notify_all();
+            return;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            work_cv_.notify_one();
+        }
     }
 
     void wait() {
@@ -417,7 +575,7 @@ public:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (!hasReadyTasksLocked() && active_tasks_ == 0) {
                     done_cv_.notify_all();
@@ -502,7 +660,7 @@ public:
                     recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                     recordDagReleaseBatchLocked(released);
                     if (released > 0) {
-                        work_cv_.notify_all();
+                        notifyWorkers(released);
                     }
                     if (key_waiters_ > 0 ||
                         (!hasReadyTasksLocked() && active_tasks_ == 0)) {
@@ -579,7 +737,7 @@ private:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, true);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (key_waiters_ > 0 ||
                     (!hasReadyTasksLocked() && active_tasks_ == 0)) {
@@ -590,10 +748,12 @@ private:
     }
 
     void flushPendingTasks() {
+        flushDagStaging();
         if (pending_count_ == 0) {
             return;
         }
 
+        const std::size_t flushed = pending_count_;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.insert(tasks_.end(), pending_tasks_.begin(),
@@ -604,7 +764,7 @@ private:
             }
         }
         pending_count_ = 0;
-        work_cv_.notify_all();
+        notifyWorkers(flushed);
     }
 
     std::size_t normalReadyCountLocked() const {
@@ -757,6 +917,10 @@ private:
         latest_producer_.clear();
         profile_output_keys_.clear();
         pending_dag_tasks_ = 0;
+        // Node indices restart with the cleared vector. The submitter is the
+        // caller here and always flushes staging before waiting, so there is no
+        // staged entry whose predicted index would be invalidated.
+        dag_next_node_index_ = 0;
     }
 
     void drainReadyTasksForLiveWindow() {
@@ -786,7 +950,7 @@ private:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (key_waiters_ > 0 ||
                     (!hasReadyTasksLocked() && active_tasks_ == 0)) {
@@ -1043,6 +1207,11 @@ private:
     std::array<std::size_t, 3> priority_task_heads_{};
     std::size_t pending_count_ = 0;
     std::size_t task_batch_size_ = 1;
+    // Submitter-private staging for dependency-aware submits. Only the thread
+    // running the Pass-generated submit sequence touches these.
+    std::vector<StagedSubmit> dag_staging_;
+    std::size_t dag_staging_limit_ = 1;
+    std::size_t dag_next_node_index_ = 0;
     std::size_t max_live_window_ = 0;
     std::mutex mutex_;
     std::condition_variable work_cv_;
@@ -1105,6 +1274,43 @@ private:
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;
 
+// Sustainable participant count for a b x b tile task, independent of how much
+// parallelism the DAG exposes. Adding participants past this point makes the
+// shared ready queue the bottleneck and actively loses throughput.
+//
+// Measured per-case optima on a 40-physical-core host, sweeping thread counts
+// with the cap disabled (best of 3 per point):
+//   b=18 B=64 -> 8 threads 4.20x, 40 threads 1.62x  (-61%)
+//   b=24 B=48 -> 16 threads 8.08x, 40 threads 3.57x (-56%)
+//   b=32 B=36 -> 16 threads 9.73x, 40 threads 6.48x (-33%)
+//   b=32 B=64 -> 24 threads 15.70x, 40 threads 9.90x (-37%)
+//   b=64 B=16 and b=96 B=8 already sit under the block-count cap, -1%.
+// The optimum tracks b roughly linearly over that range, which `b - 8`
+// reproduces: 18->10, 24->16, 32->24, and no cap from b=48 up.
+//
+// PLATFORM CAVEAT: the constant encodes this host's lock throughput relative to
+// tile task duration. The aarch64 target has narrower vector units, so the same
+// b yields a longer task and a genuinely higher sustainable count; this default
+// therefore under-provisions there, costing throughput but never correctness.
+// Re-measure with COMPILER2026_DAG_PARTICIPANT_CAP=off before trusting it as a
+// tuned value on a new platform.
+std::size_t participantCapForTile(int b) {
+    if (const char *env = std::getenv("COMPILER2026_DAG_PARTICIPANT_CAP")) {
+        if (std::strcmp(env, "off") == 0 || std::strcmp(env, "none") == 0) {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            return static_cast<std::size_t>(configured);
+        }
+    }
+    if (b <= 12) {
+        return 4;
+    }
+    return static_cast<std::size_t>(b - 8);
+}
+
 std::size_t resolveThreadCount(int n, int b) {
     std::size_t threads = std::thread::hardware_concurrency();
     if (threads == 0) {
@@ -1127,11 +1333,27 @@ std::size_t resolveThreadCount(int n, int b) {
     if (block_count <= 1) {
         return 1;
     }
-    return std::max<std::size_t>(1, std::min<std::size_t>(threads, block_count));
+    // Two independent bounds: the DAG cannot use more participants than it has
+    // blocks, and the shared queue cannot sustain more than the tile
+    // granularity allows.
+    const std::size_t by_blocks =
+        std::min<std::size_t>(threads, static_cast<std::size_t>(block_count));
+    return std::max<std::size_t>(1, std::min(by_blocks, participantCapForTile(b)));
 }
 
 int asyncMinBlockSize() {
-    int threshold = 18;
+    // Measured crossover, not a guess. Two rounds of evidence on a
+    // 40-physical-core host:
+    //   * Aggregate public-suite geomean at 40 available cores, participant cap
+    //     on: 2.284x at 16, 2.337x at 12, 2.318x at 10.
+    //   * Single cases at their own optimum participant count: b=16 reaches
+    //     3.76x-4.04x, b=12 reaches 1.65x, while b=9 (0.75x) and b=8 (0.54x)
+    //     regress because per-task overhead exceeds the 2*b^3 flops a madd
+    //     carries. The crossover therefore sits between 9 and 12.
+    // 12 is also the conservative direction for the aarch64 target: its
+    // narrower vector units make each tile task longer, so a threshold that
+    // pays off where tasks are shortest also pays off there.
+    int threshold = 12;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
         char *end = nullptr;
         const long configured = std::strtol(env, &end, 10);
@@ -1185,25 +1407,22 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
     }
 
     std::size_t batch = 1;
-    if (b <= 32) {
-        batch = 8;
-    } else if (b <= 64) {
+    if (b <= 64) {
         batch = 8;
     } else if (b <= 128) {
         batch = 4;
     }
 
-    const std::size_t participants = worker_threads + 1;
-    const std::size_t blocks = static_cast<std::size_t>(block_count);
-    if (blocks <= participants * 2) {
-        return 1;
-    }
-    if (blocks <= participants * 4) {
-        return std::min<std::size_t>(batch, 2);
-    }
-    if (blocks <= participants * 8) {
-        return std::min<std::size_t>(batch, 4);
-    }
+    // Batch size is purely a task-granularity decision: small tiles make the
+    // per-task queue round trip expensive relative to the work they carry,
+    // large tiles do not. Fairness is enforced dynamically by
+    // chooseBatchCount(), which never hands a participant more than
+    // available / participants and returns 1 whenever the ready width is thin.
+    // The static block-count clamps that used to shrink this value were a
+    // stand-in for the same guard, and they mis-fire once the participant count
+    // approaches the block count: at blocks=64 with 40 participants they forced
+    // batch 1 while the measured ready width was 283, maximizing lock traffic
+    // exactly where it hurts most.
     return batch;
 }
 
