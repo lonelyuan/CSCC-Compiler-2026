@@ -4,19 +4,23 @@ description: >-
   Project assistant for the Bisheng/LLVM compiler contest workspace at
   /Users/chenzhongyuan/Documents/bisheng. Use when Codex works on this dynamic
   operator graph compilation and parallel scheduling project: configuring the
-  openEuler/BiSheng VM, syncing to root@192.168.8.131, building LLVM
-  Pass/runtime artifacts, packaging/submitting zip deliverables, interpreting
-  judge results, maintaining docs, benchmarking, or implementing compiler-level
-  optimizations under contest rules without SDK hacks or fake speedups.
+  openEuler/BiSheng compatibility VM or 40-core Ubuntu Xeon performance host,
+  syncing remote workspaces, building LLVM Pass/runtime artifacts,
+  packaging/submitting zip deliverables, interpreting judge results, maintaining
+  docs, benchmarking, or implementing compiler-level optimizations under contest
+  rules without SDK hacks or fake speedups.
 ---
 
 # Compiler Contest Assistant
 
 Use this skill as the standing project guide for `/Users/chenzhongyuan/Documents/bisheng`. Prefer engineering changes that improve the compiler pass and runtime design, not one-off contest hacks.
 
-## Workspace And VM
+## Workspace And Remote Hosts
 
 - Local workspace: `/Users/chenzhongyuan/Documents/bisheng`.
+
+### openEuler/BiSheng compatibility VM
+
 - VM project path: `/root/bisheng`.
 - VM login: `ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131`.
 - VM environment: openEuler aarch64, BiSheng under `/opt/bisheng`, LLVM 15.0.4.
@@ -33,6 +37,23 @@ source /etc/profile.d/bisheng.sh
 ```
 
 - Do not hard-code or persist plaintext passwords in files. Use the existing SSH key path above; if authentication fails, ask the user.
+
+### 40-core Ubuntu Xeon performance host
+
+- Login: `ssh -i ~/.ssh/ouc_xeon_ed25519 -p 6000 -o StrictHostKeyChecking=accept-new ouc@43.142.45.204`.
+- Remote project mirror: `/home/ouc/bisheng` (`~/bisheng`). It has no Git metadata; keep the local repository as the source of truth.
+- Environment: Ubuntu 22.04.5 x86_64, two Intel Xeon Gold 5218R CPUs, 40 physical cores / 80 logical CPUs, LLVM 17.0.6, no BiSheng toolchain.
+- Load the LLVM 17 environment before every build or experiment:
+
+```bash
+source ~/llvm17.env
+```
+
+- `~/llvm17.env` selects `/usr/lib/llvm-17`, sets generator/verifier concurrency to 40, and preserves benchmark artifacts.
+- Use `taskset -c 0-39` for the established 40-physical-core experiment convention. Record any different CPU affinity in the benchmark evidence.
+- Use this host for x86_64 scheduler scaling and same-host speedup comparisons. Do not treat it as BiSheng/aarch64 compatibility proof or as the formal judge performance environment.
+- Coordinate before replacing `~/bisheng`: another worktree or agent may have an active experiment there. `~/tb.sh` is a Round 7 task-batch sweep, not host bootstrap; do not overwrite or run it unless the current task calls for that experiment.
+- Do not persist private keys, passwords, or authentication material in the repository. If key authentication fails, ask the user.
 
 ## Current Project Layout
 
@@ -93,11 +114,13 @@ Prioritize compiler credibility:
 - Keep changes scoped and reversible; use git commits for meaningful milestones.
 - Preserve judge-compatible package layout: archive root must contain `CMakeLists.txt`.
 - Prefer IR analysis and dependency recovery over source rewriting.
-- Treat the current 4-vCPU VM as a debugging platform, not the real performance target.
+- Treat the 4-vCPU openEuler VM as the BiSheng compatibility gate and the 40-core Xeon host as a scalability/performance debugging platform; neither substitutes for formal judge results.
 - Design for real Kunpeng 920 multi-core scaling: likely 48/64-core class servers and possible larger final cases.
 - When an optimization regresses or is not clearly valid, revert or document it as an experiment.
 
 ## Standard Commands
+
+### openEuler/BiSheng compatibility VM
 
 Build submission on VM:
 
@@ -136,6 +159,24 @@ ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 
   'source /etc/profile.d/bisheng.sh && cd /root/bisheng && llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - 2>/dev/null | grep -n "compiler2026_async_impl\|compiler2026_task_\|compiler2026_runtime_submit\|call.*@trsm\|call.*@madd\|define.*block_cholesky" | sed -n "1,160p"'
 ```
 
+### 40-core Ubuntu Xeon performance host
+
+Build the current remote mirror:
+
+```bash
+ssh -i ~/.ssh/ouc_xeon_ed25519 -p 6000 -o StrictHostKeyChecking=accept-new ouc@43.142.45.204 \
+  'source ~/llvm17.env && cd ~/bisheng && ./submission/scripts/build.sh'
+```
+
+Run a judge-shaped benchmark on the 40 physical cores:
+
+```bash
+ssh -i ~/.ssh/ouc_xeon_ed25519 -p 6000 -o StrictHostKeyChecking=accept-new ouc@43.142.45.204 \
+  'source ~/llvm17.env && cd ~/bisheng && LABEL=<label> REPEAT=3 COMPILER2026_DAG_THREAD_LIST=40 taskset -c 0-39 ./submission/scripts/benchmark.sh'
+```
+
+Archive the resulting CSV under `docs/benchmark_results/` and record the exact remote commit/source state. Compare only against baselines measured on this same host and affinity configuration.
+
 ## Submission/Judge Workflow
 
 When preparing a submission:
@@ -160,6 +201,10 @@ cmake --build /tmp/judge_zip_test/build -j"$(nproc)"
 ```
 
 7. Commit code/docs changes.
+
+For an authorized online upload, switch to the repository's
+`contest-submission` skill. Keep formal judge submission separate from the
+cloud-desktop evaluation workflow.
 
 If judge reports CE, first inspect package root layout, `CMakeLists.txt`, `manifest.json`, CMake output, and whether paths assume repository root instead of submission root.
 

@@ -58,7 +58,7 @@ cmake --build /tmp/judge_zip_test/build -j"$(nproc)"
 - 请求体：`multipart/form-data`，文件字段名为 `file`。小型非压缩文件可能附加 `fileEncoding=gzip`；正常提交包为 zip，应保持原始压缩内容。
 - 成功上传后：进入 `showOJPProcessMsg.jsp?...&doNewSubmit=true` 查看队列、构建、功能和性能评测输出。
 
-这些请求依赖浏览器的已登录会话和页面生成的短期状态。不要直接用命令行重放请求，也不要从 URL、脚本或浏览器存储中提取凭证。正式竞赛提交必须单独显式授权，且上传前至少确认以下内容：
+这些请求依赖浏览器的已登录会话和页面生成的短期状态。仓库的 `scripts/contest_submit.py` 会从已登录页面动态发现 ID 和结果 URL，正式竞赛提交必须单独显式授权；一次授权只执行一次上传，不对 2xx 后的超时自动重试。上传前至少确认以下内容：
 
 1. 文件确为刚刚通过复建检查的 `dist/submission.zip`。
 2. 所见 SHA-256 与预览一致。
@@ -66,6 +66,33 @@ cmake --build /tmp/judge_zip_test/build -j"$(nproc)"
 4. 操作者明确同意开始一次新的线上评测。
 
 评测结束后，保存页面显示的功能通过数、几何平均加速比、总分以及完整的 `judge_stdout_tail` 到工程日志；不要把网页上的临时下载链接或参数提交进 Git。
+
+只读发现与状态读取：
+
+```bash
+python3 scripts/contest_submit.py \
+  --contest-url '<contest-task-url>' \
+  --cookie-file /secure/path/course.cookies.txt \
+  discover
+
+python3 scripts/contest_submit.py \
+  --contest-url '<contest-task-url>' \
+  --cookie-file /secure/path/course.cookies.txt \
+  status --result-file build/judge_results/current.json
+```
+
+在当前对话已获得一次正式提交授权后，先展示并复核 SHA-256，再执行：
+
+```bash
+python3 scripts/contest_submit.py \
+  --contest-url '<contest-task-url>' \
+  --cookie-file /secure/path/course.cookies.txt \
+  submit --bundle /absolute/path/to/submission.zip \
+  --expect-sha256 '<reviewed-sha256>' \
+  --result-file build/judge_results/<label>.json
+```
+
+脚本要求 Cookie 文件权限为 `0600`，不会输出 Cookie 或带 `userID` 的轮询 URL。它用提交前结果哈希排除旧结果，只有内容变化且出现终态 verdict 才结束；上传已返回 2xx 后若轮询超时，状态为“歧义”，必须人工核对而不是再次上传。
 
 ## 云桌面：适合什么，不适合什么
 

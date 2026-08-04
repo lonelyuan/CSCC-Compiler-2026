@@ -1,0 +1,4 @@
+interface:
+  display_name: "Contest Submission"
+  short_description: "Safely package, submit, and poll CourseGrading judging"
+  default_prompt: "Use $contest-submission to validate and submit the current Bisheng package once, then report the judge result."

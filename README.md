@@ -37,9 +37,13 @@
 │       ├── benchmark.sh
 │       └── package.sh
 ├── scripts/
-│   └── sync_to_vm.sh
+│   ├── sync_to_vm.sh
+│   ├── contest_submit.py
+│   └── cloud_desktop_*.py/sh
 ├── skills/
-│   └── compiler-contest-assistant/
+│   ├── compiler-contest-assistant/
+│   ├── cloud-desktop-evaluation/
+│   └── contest-submission/
 ├── contestant_sdk/
 ├── build/
 └── dist/
@@ -65,23 +69,28 @@
 - `scripts/prepare_cloud_desktop_bundle.sh`：生成可由云桌面自动化测试的源码 bundle、校验值和远程执行命令。
 - `scripts/upload_cloud_desktop_bundle.sh`：使用新鲜云桌面链接的短期能力参数上传测试 bundle，不用于正式竞赛提交。
 - `scripts/cloud_desktop_rfb.py`：可选的 noVNC WebSocket/RFB 协议客户端，用于探测连接、发送终端命令和读取剪贴板结果。
+- `scripts/contest_submit.py`：动态发现 CourseGrading 正式提交接口，校验 zip、执行一次已授权上传并轮询新评测结果。
 - `requirements-cloud-desktop.txt`：RFB 协议客户端的隔离 Python 依赖；日常构建不需要安装。
 - `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
 
 ## Codex Skill
 
-本仓库包含一个项目专用 skill：
+本仓库包含项目开发、云桌面测试与正式提交三个相互隔离的 skill：
 
 ```text
 skills/compiler-contest-assistant/
+skills/cloud-desktop-evaluation/
+skills/contest-submission/
 ```
 
 协作者可以复制或软链接到自己的 Codex skills 目录：
 
 ```bash
 mkdir -p ~/.codex/skills
-ln -s "$(pwd)/skills/compiler-contest-assistant" ~/.codex/skills/compiler-contest-assistant
+for skill in compiler-contest-assistant cloud-desktop-evaluation contest-submission; do
+  ln -s "$(pwd)/skills/$skill" "$HOME/.codex/skills/$skill"
+done
 ```
 
 之后在 Codex 中显式调用：
@@ -90,7 +99,7 @@ ln -s "$(pwd)/skills/compiler-contest-assistant" ~/.codex/skills/compiler-contes
 $compiler-contest-assistant 继续优化本项目
 ```
 
-该 skill 会提醒 Codex 使用 openEuler/BiSheng VM、遵守比赛规则、不修改 SDK/算子实现、不做虚假优化，并优先从 IR 依赖分析、任务图调度和 runtime 扩展性角度推进项目。
+三个 skill 分别负责工程开发、云桌面测试和正式竞赛提交。正式提交始终需要当前会话中的明确授权，一次授权只允许一次上传。
 
 ## 常用命令
 
