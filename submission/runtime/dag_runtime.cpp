@@ -1342,14 +1342,18 @@ std::size_t resolveThreadCount(int n, int b) {
 }
 
 int asyncMinBlockSize() {
-    // Measured crossover, not a guess: on a 40-physical-core host the aggregate
-    // public-suite geomean improves from 1.926x to 2.250x when this drops from
-    // 18 to 16, stays flat at 12, and collapses to 1.487x at 8 where per-task
-    // overhead exceeds the 2*b^3 flops a single madd carries. 16 is also the
-    // conservative direction for the aarch64 target: its narrower vector units
-    // make each tile task longer, so a threshold that pays off where tasks are
-    // shortest also pays off there.
-    int threshold = 16;
+    // Measured crossover, not a guess. Two rounds of evidence on a
+    // 40-physical-core host:
+    //   * Aggregate public-suite geomean at 40 available cores, participant cap
+    //     on: 2.284x at 16, 2.337x at 12, 2.318x at 10.
+    //   * Single cases at their own optimum participant count: b=16 reaches
+    //     3.76x-4.04x, b=12 reaches 1.65x, while b=9 (0.75x) and b=8 (0.54x)
+    //     regress because per-task overhead exceeds the 2*b^3 flops a madd
+    //     carries. The crossover therefore sits between 9 and 12.
+    // 12 is also the conservative direction for the aarch64 target: its
+    // narrower vector units make each tile task longer, so a threshold that
+    // pays off where tasks are shortest also pays off there.
+    int threshold = 12;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
         char *end = nullptr;
         const long configured = std::strtol(env, &end, 10);
