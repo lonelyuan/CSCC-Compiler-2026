@@ -1348,3 +1348,71 @@ async 用例是 b=32/64/128/256 → block 数 32/16/8/4 → 分别只能用 32/1
    （B=64 用 40 线程只有 8.36x，用 16 线程有 11.74x），在 `block_count < 18` 时相对
    DAG 平均宽度又偏多。
 3. 对 `b < 18` 做 task 粗化，把公开集里 49/150 个串行路径用例带入并行路径。
+
+## 2026-08-05 批量化 DAG 提交（Round 2）
+
+背景：Round 1 的 profile 证明绑定约束是单线程 DAG 提交——`submitWithDeps` 对每个 task
+单独获取全局 mutex，与 N 个 worker 争同一把锁，导致队列饥饿的正反馈。
+
+改动：
+
+- `submitWithDeps` 拆成"暂存 + 批量发布"两段。依赖键解析（`latest_producer_` 哈希查找）、
+  重复依赖去重、输出键登记全部移出临界区，因为 `dag_nodes_`、`successor_edges_`、
+  `latest_producer_` **只有提交线程追加**，worker 只修改已发布节点的 `pending`/`completed`
+  并读取 successor 边。
+- 新增 `StagedSubmit` 暂存项：保存 task 函数、context、priority，以及已解析为
+  producer 节点索引的依赖（`kDepSkip` 表示依赖为负或重复，`kDepMissing` 表示该键没有
+  活跃 producer）。节点索引由 `dag_next_node_index_ + dag_staging_.size()` 预测；
+  预测索引可以直接写入 `latest_producer_`，因为未发布的节点不可能被完成，后续连边一定
+  会变成真实边。
+- 新增 `flushDagStaging()`：一次加锁内完成"先追加全部节点 → 再连全部边 → 最后入队就绪
+  节点"。这个顺序是正确性关键：若先入队，worker 可能在同批 producer 的 successor 边
+  建立之前就完成它，从而丢失依赖。
+- `flushPendingTasks()` 先 flush DAG 暂存，因此 `wait()` / `waitForKey()` 入口自动清空暂存。
+- `clearCompletedDagStateLocked()` 同步把 `dag_next_node_index_` 归零——它会清空
+  `dag_nodes_`，索引预测必须跟着重置，否则会连到错误节点。这是本轮最容易踩的坑。
+- 批量大小 `chooseDagStagingLimit()`：`reserve_tasks / (participants * 2)`，上限 32，
+  下限 1；`COMPILER2026_DAG_SUBMIT_BATCH` 可覆盖。原则是只有当首个 panel 的工作量明显
+  多于"暂存一批期间线程池能消费的量"时才压批，block 数小的场景自动退回逐个发布。
+- 开启 `COMPILER2026_DAG_MAX_LIVE` 的实验路径会在每次 submit 后强制 flush，等于关闭批量。
+  该路径默认关闭，保持正确性优先。
+
+隔离用例 `n=2048 b=32`（64 blocks，线程上限不绑定，每点 3 次取最小值）：
+
+| 线程 | 1 | 2 | 4 | 8 | 16 | 24 | 32 | 40 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Round 0 | 0.92x | 1.73x | 3.55x | 6.67x | 11.32x | 7.70x | 7.79x | 7.82x |
+| Round 1 | 1.00x | 1.76x | 3.55x | 6.80x | 11.74x | 8.28x | 7.53x | 8.36x |
+| Round 2 | 0.98x | 1.86x | 3.54x | 6.74x | 12.09x | **14.08x** | 11.98x | 8.42x |
+
+峰值由 16 线程 11.74x 移到 24 线程 **14.08x**（+20%）；24 线程点 +70%，32 线程点 +59%。
+`scaled_residual` 与 serial 逐位一致。
+
+全集聚合（`xeon_r2_submit_batch.csv`，REPEAT=3，312 个 verifier 全 PASS）：
+
+| 线程 | 1 | 2 | 4 | 8 | 16 | 24 | 32 | 40 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Round 0 | 1.017x | 1.352x | 1.722x | 1.844x | 1.839x | — | 1.856x | 1.796x |
+| Round 2 | 1.011x | 1.349x | 1.691x | 1.875x | **1.956x** | 1.869x | 1.824x | 1.810x |
+
+经验：
+
+- 聚合只从 1.844x 升到 1.956x（+6%），远小于隔离用例的 +20%。原因是聚合仍被
+  Round 1 结论 3 的两重稀释压住：`resolveThreadCount` 的 block 数上限，以及 `b < 18`
+  的串行路径。**隔离指标的收益要落到聚合上，必须先解除这两个上限。**
+- "提交者与 worker 争同一把锁"这类瓶颈在小核数平台上完全不可见：4 核时提交者几乎总能
+  拿到锁。这解释了为什么此前所有基于 4-vCPU 的调优都没有触及它。
+
+profile 显示瓶颈已转移（同一隔离用例）：
+
+| 线程 | 时间 | max_ready | max_batch | worker_idle_ms |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 0.121s | 1482 | 2 | 110 |
+| 24 | 0.103s | 1134 | 2 | 274 |
+| 40 | 0.173s | 283 | 1 | 3759 |
+
+队列深度相对 Round 1 提升 13–27 倍，提交饥饿基本解除。但 40 线程时 `max_batch` 被
+**策略**压成 1：`selectTaskBatchSize` 的 `blocks <= participants * 2` 规则在
+`blocks=64, participants=40` 时命中（64 <= 80）。此时 ready 宽度有 283，批量本可放大，
+说明该静态规则用 block 数近似 ready 宽度，在高参与者数下失准；而 `chooseBatchCount`
+里的 `available / participants` 已经是正确的动态公平性保护。这是 Round 3 的目标。
