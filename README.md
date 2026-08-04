@@ -18,6 +18,7 @@
 │   ├── performance.md
 │   ├── roadmap.md
 │   ├── engineering_log.md
+│   ├── judge_automation.md
 │   └── benchmark_results/
 ├── submission/
 │   ├── CMakeLists.txt
@@ -56,10 +57,15 @@
 - `docs/performance.md`：性能实验结果和 CSV 路径。
 - `docs/roadmap.md`：面向真实鲲鹏多核平台和决赛扩展数据的长期优化路线。
 - `docs/engineering_log.md`：记录每轮优化的验证结果、经验教训和后续约束。
+- `docs/judge_automation.md`：提交前自动化、云桌面文件传输和浏览器 agent 操作边界。
 - `docs/benchmark_results/`：历史和当前 benchmark 结果。
 - 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
 - `contestant_sdk/`：官方 SDK、baseline、测试工具和公开 case。
 - `scripts/sync_to_vm.sh`：把本地工程同步到 openEuler/BiSheng 虚拟机。
+- `scripts/prepare_cloud_desktop_bundle.sh`：生成可由云桌面自动化测试的源码 bundle、校验值和远程执行命令。
+- `scripts/upload_cloud_desktop_bundle.sh`：使用新鲜云桌面链接的短期能力参数上传测试 bundle，不用于正式竞赛提交。
+- `scripts/cloud_desktop_rfb.py`：可选的 noVNC WebSocket/RFB 协议客户端，用于探测连接、发送终端命令和读取剪贴板结果。
+- `requirements-cloud-desktop.txt`：RFB 协议客户端的隔离 Python 依赖；日常构建不需要安装。
 - `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
 

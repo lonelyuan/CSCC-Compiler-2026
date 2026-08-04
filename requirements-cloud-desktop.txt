@@ -1,0 +1,5 @@
+# WebSocket transport used by the CourseGrading websockify endpoint.
+websocket-client==1.8.0
+
+# DES implementation required by the RFB VNC Authentication handshake.
+pycryptodome==3.23.0

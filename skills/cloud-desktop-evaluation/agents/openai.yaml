@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloud Desktop Evaluation"
+  short_description: "Guarded tests through the CourseGrading cloud desktop."
+  default_prompt: "Use $cloud-desktop-evaluation to prepare and run a guarded cloud-desktop test."
