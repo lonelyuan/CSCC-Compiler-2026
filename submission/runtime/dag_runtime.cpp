@@ -1352,25 +1352,22 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
     }
 
     std::size_t batch = 1;
-    if (b <= 32) {
-        batch = 8;
-    } else if (b <= 64) {
+    if (b <= 64) {
         batch = 8;
     } else if (b <= 128) {
         batch = 4;
     }
 
-    const std::size_t participants = worker_threads + 1;
-    const std::size_t blocks = static_cast<std::size_t>(block_count);
-    if (blocks <= participants * 2) {
-        return 1;
-    }
-    if (blocks <= participants * 4) {
-        return std::min<std::size_t>(batch, 2);
-    }
-    if (blocks <= participants * 8) {
-        return std::min<std::size_t>(batch, 4);
-    }
+    // Batch size is purely a task-granularity decision: small tiles make the
+    // per-task queue round trip expensive relative to the work they carry,
+    // large tiles do not. Fairness is enforced dynamically by
+    // chooseBatchCount(), which never hands a participant more than
+    // available / participants and returns 1 whenever the ready width is thin.
+    // The static block-count clamps that used to shrink this value were a
+    // stand-in for the same guard, and they mis-fire once the participant count
+    // approaches the block count: at blocks=64 with 40 participants they forced
+    // batch 1 while the measured ready width was 283, maximizing lock traffic
+    // exactly where it hurts most.
     return batch;
 }
 
