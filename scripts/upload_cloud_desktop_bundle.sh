@@ -107,3 +107,7 @@ if [[ ! -s "${RESPONSE_PATH}" ]]; then
   printf '%s\n' 'upload response was empty; upload is unverified and must not be treated as successful.' >&2
   exit 69
 fi
+if ! grep -Eq 'alert[[:space:]]+alert-success|文件已经成功上传' "${RESPONSE_PATH}"; then
+  printf '%s\n' 'upload response did not contain the platform success signal.' >&2
+  exit 69
+fi

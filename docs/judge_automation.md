@@ -178,7 +178,7 @@ build/cloud_desktop/.venv/bin/python scripts/cloud_desktop_rfb.py \
   --result-file /mnt/cgshare/cloud_eval_<label>/result.env
 ```
 
-只有 `cicdParam` 的短链接需要先在同一登录会话中换取 `desktopParam`。实测无 Cookie 的直接 WebSocket Upgrade 会超时，因此“新鲜 URL 本身”目前不足以建立独立 RFB 客户端。客户端不会打印或保存 token/password；其协议路径在提供匹配 Cookie 后仍需做端到端验证。
+只有 `cicdParam` 的短链接需要先在同一登录会话中换取 `desktopParam`。实测无 Cookie 的直接 WebSocket Upgrade 会超时，因此“新鲜 URL 本身”目前不足以建立独立 RFB 客户端。客户端不会打印或保存 token/password。提供匹配 Cookie 后，WebSocket Upgrade、RFB 3.8/VNC Authentication、ClientCutText、KeyEvent 和 ServerCutText 结果回传均已端到端验证。
 
 远端镜像实测没有 `xclip` 和 `xsel`。结果读取不依赖这两个工具：runner 完成后清屏并打印 `CLOUD_EVAL_RESULT ... CLOUD_EVAL_RESULT_END`，自动化相对 Canvas 左上角操作最大化 XFCE Terminal 的 `Edit → Select All → Edit → Copy`。页面 `#clipboardText` 已实际读回完整探针结果；纯 RFB 客户端则等待对应 ServerCutText。该菜单坐标只在“终端最大化、默认菜单栏可见”这一预条件下使用。
 
@@ -189,6 +189,12 @@ build/cloud_desktop/.venv/bin/python scripts/cloud_desktop_rfb.py \
 3. 仅在前两者不可用时，对终端截图/OCR。
 
 推荐远程命令始终输出机器可读的短结果，例如 `status=<...>`、`exit_code=<...>`、`log=/mnt/cgshare/...`。不要让 agent 从长终端滚屏中推断成败。
+
+### 当前云桌面镜像的构建能力
+
+2026-08-05 对当前会话实测：测试包通过带登录 Cookie 的 curl 成功上传，远端 Python 3 可以解包，RFB 客户端可以执行命令并读回唯一标记的结果。但镜像中没有 `/etc/profile.d/bisheng.sh`、`/opt/bisheng`、clang、llvm-config、cmake 或 ninja，只有系统 GCC；仓库 SDK 的预编译 generator/verifier 又是 x86-64，不能用于该 aarch64 桌面。因此当前会话返回 `status=setup_error, exit_code=127`，不能运行 LLVM smoke test。
+
+这属于目标环境缺少构建前提，不是上传/RFB 自动化失败。`cloud_desktop_run.sh` 会检查必需工具并始终写出结构化 `result.env`，不得把该结果报告为测试通过。
 
 ## 推荐的 AI 协作分层
 

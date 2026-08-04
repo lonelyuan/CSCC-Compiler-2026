@@ -26,16 +26,39 @@ if [[ ! -d "${PROJECT_DIR}" ]]; then
   exit 64
 fi
 
+if [[ -r /etc/profile.d/bisheng.sh ]]; then
+  # shellcheck disable=SC1091
+  source /etc/profile.d/bisheng.sh
+fi
+
+MISSING_TOOLS=()
+for required_tool in \
+  cmake ninja \
+  /opt/bisheng/bin/clang \
+  /opt/bisheng/bin/clang++ \
+  /opt/bisheng/bin/llvm-config \
+  /opt/bisheng/bin/llvm-link \
+  /opt/bisheng/bin/opt; do
+  if ! command -v "${required_tool}" >/dev/null 2>&1; then
+    MISSING_TOOLS+=("${required_tool}")
+  fi
+done
+if (( ${#MISSING_TOOLS[@]} > 0 )); then
+  {
+    printf '%s\n' 'cloud desktop is missing required build tools:'
+    printf '  %s\n' "${MISSING_TOOLS[@]}"
+  } > "${LOG_FILE}"
+  write_result "setup_error" 127
+  cat "${RESULT_FILE}"
+  printf '%s\n' '--- test.log (tail) ---'
+  tail -n 60 "${LOG_FILE}" || true
+  exit 127
+fi
+
 {
   printf 'run_root=%s\n' "${RUN_ROOT}"
   printf 'project_dir=%s\n' "${PROJECT_DIR}"
   printf 'test_command=%s\n' "${TEST_COMMAND}"
-  if [[ ! -r /etc/profile.d/bisheng.sh ]]; then
-    printf 'missing BiSheng toolchain profile: /etc/profile.d/bisheng.sh\n' >&2
-    exit 127
-  fi
-  # shellcheck disable=SC1091
-  source /etc/profile.d/bisheng.sh
   cd "${PROJECT_DIR}"
   bash -lc "${TEST_COMMAND}"
 } > "${LOG_FILE}" 2>&1

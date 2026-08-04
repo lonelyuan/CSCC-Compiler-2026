@@ -13,6 +13,7 @@ import argparse
 import base64
 import http.cookiejar
 import re
+import secrets
 import shlex
 import struct
 import sys
@@ -223,7 +224,9 @@ class RFBClient:
         self.clipboard(command)
         time.sleep(0.25)
         self.chord(0xFFE1, 0xFF63)  # Shift_L + Insert pastes X11 clipboard.
+        time.sleep(0.75)
         self.chord(0xFF0D)  # Return.
+        time.sleep(1.0)
 
     def wait_for_clipboard(self, marker: str, timeout: float) -> str:
         if self.ws is None:
@@ -283,17 +286,20 @@ def _read_command(path: Path) -> str:
     return " && ".join(lines)
 
 
-def _with_result_output(command: str, result_file: str) -> str:
+def _with_result_output(command: str, result_file: str, marker_text: str) -> str:
     result = shlex.quote(result_file)
-    marker = shlex.quote(RESULT_MARKER)
-    end_marker = shlex.quote(f"{RESULT_MARKER}_END")
+    setup_log = shlex.quote(f"/tmp/{marker_text}.log")
+    marker = shlex.quote(marker_text)
+    end_marker = shlex.quote(f"{marker_text}_END")
     return (
-        f"{{ {command}; }}; __cg_rc=$?; "
+        f"{{ {command}; }} >{setup_log} 2>&1; __cg_rc=$?; "
         "clear; "
         f"printf '%s\\n' {marker}; "
-        f"cat {result} 2>&1; "
+        f"if test -f {result}; then cat {result}; "
+        "else printf 'status=setup_error\\nexit_code=%s\\n' \"$__cg_rc\"; "
+        f"tail -n 20 {setup_log}; fi; "
         f"printf '%s\\n' {end_marker}; "
-        "unset __cg_rc"
+        f"rm -f {setup_log}; unset __cg_rc"
     )
 
 
@@ -328,13 +334,14 @@ def main() -> int:
             if args.action == "probe":
                 return 0
             command = _read_command(args.command_file)
+            marker = f"{RESULT_MARKER}_{secrets.token_hex(8)}"
             if args.result_file:
-                command = _with_result_output(command, args.result_file)
+                command = _with_result_output(command, args.result_file, marker)
             client.run_terminal_command(command)
             print("command_sent=yes")
             if args.result_file:
                 result = client.collect_terminal_result(
-                    f"{RESULT_MARKER}_END", args.result_timeout
+                    f"{marker}_END", args.result_timeout
                 )
                 print(result)
         return 0

@@ -66,6 +66,8 @@ If the matching logged-in Netscape cookie file is available, the optional
 RFB pointer, clipboard, and key events over websockify. Read
 `docs/judge_automation.md` before using it. Do not claim that URL-only direct
 RFB works: the endpoint timed out without the matching browser session.
+With the matching cookie, the WebSocket upgrade, RFB authentication, command
+injection, and uniquely marked ServerCutText return path have been verified.
 
 `run.sh` always writes:
 
@@ -78,6 +80,11 @@ Read `result.env` first through the remote clipboard, workspace file browser,
 or download dialog. Use `test.log` only for diagnosis. Report the bundle SHA,
 exit code, result status, and a bounded log tail. Never claim a successful test
 unless `result.env` says `status=passed` and `exit_code=0`.
+
+Before running the smoke command, `run.sh` verifies cmake, ninja, and the
+required `/opt/bisheng` LLVM tools. Missing tools must produce
+`status=setup_error` and exit code 127. The cloud image tested on 2026-08-05
+lacked those prerequisites; do not misreport protocol success as test success.
 
 The remote image has neither `xclip` nor `xsel`. To retrieve a short structured
 result without OCR, run `clear; cat <result>; printf <end-marker>`, then operate
