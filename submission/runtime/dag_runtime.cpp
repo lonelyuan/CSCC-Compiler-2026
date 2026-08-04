@@ -1333,12 +1333,27 @@ std::size_t resolveThreadCount(int n, int b) {
     if (block_count <= 1) {
         return 1;
     }
-    // Two independent bounds: the DAG cannot use more participants than it has
-    // blocks, and the shared queue cannot sustain more than the tile
-    // granularity allows.
-    const std::size_t by_blocks =
-        std::min<std::size_t>(threads, static_cast<std::size_t>(block_count));
-    return std::max<std::size_t>(1, std::min(by_blocks, participantCapForTile(b)));
+    // Three interacting bounds, all fitted to the 11 measured per-case optima
+    // rather than to a single point:
+    //   * block count: the DAG never exposes more than that many panels.
+    //   * tile granularity: participantCapForTile(b), the shared queue's
+    //     sustainable participant count for a b x b task.
+    //   * average panel width: the panel index sweeps from block_count down to
+    //     1, so participants beyond about half the blocks sit idle for the
+    //     second half of the run. This is what separates b=32 B=32 (optimum 16)
+    //     from b=32 B=64 (optimum 24) -- the granularity bound alone predicts 24
+    //     for both and loses 14% on the former.
+    //   * a floor of min(block_count, 16) on the WIDTH bound only: for few
+    //     blocks the early panels still hold block_count*(block_count-1)/2
+    //     tasks, so half-width is too pessimistic there (b=64 B=16 wants 16, not
+    //     8). The floor must not lift the granularity bound: doing so gave
+    //     b=16 B=72 sixteen participants where 8 is optimal (3.76x vs 2.60x) and
+    //     cost 7% aggregate.
+    const std::size_t blocks = static_cast<std::size_t>(block_count);
+    const std::size_t width = std::max(std::min<std::size_t>(blocks, 16),
+                                       std::max<std::size_t>(1, blocks / 2));
+    const std::size_t shaped = std::min(participantCapForTile(b), width);
+    return std::max<std::size_t>(1, std::min(std::min<std::size_t>(threads, blocks), shaped));
 }
 
 int asyncMinBlockSize() {

@@ -291,3 +291,70 @@ docs/benchmark_results/cross_panel_fanout_priority_profile_smoke.csv
 - runtime 不包含算子专用 wrapper，不替换官方算子实现。
 
 后续更大的性能空间来自跨 panel 的 block-coordinate ready queue DAG：让下一 panel 在其依赖 block 更新完成后提前启动，而不是等待整个 trailing matrix 更新完成。
+
+## 2026-08-05 40 物理核平台多轮调度优化（非正式环境，x86_64）
+
+环境：Intel Xeon Gold 5218R ×2，x86_64 / Ubuntu 22.04.5 / glibc 2.35，40 物理核 /
+80 逻辑核，2 NUMA node，LLVM 17.0.6（**无毕昇**），`taskset -c 0-39`，governor performance。
+
+**这不是正式性能环境。** 正式成绩仍以鲲鹏 920 / openEuler aarch64 / 毕昇 15 为准；
+跨机绝对时间不可比，本节只用于记录同机的相对提升和结构性结论。本文件开头的
+`live_window_default_repeat3_final` 仍是唯一的 openEuler aarch64 正式记录。
+
+### 全部 150 个公开用例（默认配置，无任何环境覆盖，40 核可用）
+
+```text
+serial_seconds=39.720028994
+contestant_seconds=16.130582711
+speedup=2.462x
+150/150 status=PASS
+```
+
+复现命令：
+
+```bash
+source /path/to/llvm17.env   # LLVM_CONFIG/CC/CXX/CLANG/OPT/LLVM_LINK/LLVM_DIS
+SPEC_START=1 SPEC_END=150 GENERATOR_THREADS=40 VERIFIER_THREADS=40 \
+  taskset -c 0-39 ./submission/scripts/smoke_test.sh
+```
+
+### 四个 benchmark suite（默认配置，40 核可用，REPEAT=3）
+
+| suite | serial avg | contestant avg | speedup |
+| --- | ---: | ---: | ---: |
+| `n1024` | 1.236435s | 0.460998s | 2.683x |
+| `n768` | 0.946272s | 0.374642s | 2.526x |
+| `n1152_small_b` | 1.701613s | 0.707272s | 2.409x |
+| `n512_576` | 0.376700s | 0.196945s | 1.913x |
+
+聚合 geomean **2.363x**，39/39 verifier PASS。CSV：`benchmark_results/xeon_r7_final.csv`。
+
+### 多轮进展（同机、同配置、40 核可用）
+
+| 轮次 | 改动 | 聚合 geomean |
+| --- | --- | ---: |
+| 起点 | — | 1.796x |
+| Round 1 | 定向唤醒替代 `notify_all` | 1.802x |
+| Round 2 | 批量化 DAG 提交 | 1.810x |
+| Round 3 | 移除批量的静态 block 数钳制 | 1.802x |
+| Round 4 | 异步阈值 18 → 16 | 1.827x |
+| Round 5 | 按 tile 粒度限制参与者数 | 2.284x |
+| Round 6 | 异步阈值 16 → 12 | 2.337x |
+| Round 7 | 批量上限 8 → 16 | **2.363x** |
+
+累计 **+31.6%**。Round 1–3 在聚合上几乎不动，收益全部体现在隔离用例上
+（`n=2048 b=32` 峰值 11.32x → 15.70x，+39%）——因为聚合当时被线程过量供给和
+串行路径两重稀释压住，直到 Round 4–6 解除这两个上限，前几轮的调度改进才转化为聚合收益。
+这条因果链记录在 `engineering_log.md`。
+
+### 已标定的上界
+
+模型 `speedup_case = eff × min(cores, B, cap(b))`（按 flops 加权合成，效率取实测均值 0.46）
+预测 2.42x，实测 2.363x，误差 4%。据此：
+
+- 当前结构（tile 级任务 + panel 局部 DAG）在这批公开用例上的上界约 **2.4x，已经达到**。
+- 要再进一步，模型给出的候选：`madd` 算子级子分块（把 `madd(b)` 分解为多个 `madd(b')`
+  调用，仍调用官方算子，只改变分块）预测 **3.13x**；对 `b < 12` 做 task 粗化可继续抬高
+  `n1152_small_b` 与 `n512_576`。两者都是 Pass 侧较大改动，尚未实施。
+- 跨 panel DAG 已被两次否证，原因是可用并行度（ready 宽度 1134）比可持续参与者数（≤24）
+  高一到两个数量级，不应继续投入。
