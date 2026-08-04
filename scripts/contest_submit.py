@@ -41,6 +41,11 @@ SUMMARY_KEYS = (
     "performance_score",
     "total_score",
 )
+CONFIG_DIR_ENV = "BISHENG_CONTEST_CONFIG_DIR"
+DEFAULT_CONFIG_DIR = Path.home() / ".config" / "bisheng-contest"
+CONTEST_URL_FILENAME = "contest_url.txt"
+COOKIE_FILENAME = "course.cookies.txt"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class SubmissionError(RuntimeError):
@@ -111,6 +116,60 @@ class _TextExtractor(HTMLParser):
         raw = "".join(self.parts).replace("\xa0", " ")
         lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw.splitlines()]
         return "\n".join(line for line in lines if line)
+
+
+def _resolve_config_dir(explicit: Path | None) -> Path:
+    raw = explicit or Path(os.environ.get(CONFIG_DIR_ENV, str(DEFAULT_CONFIG_DIR)))
+    path = raw.expanduser()
+    if not path.is_absolute():
+        raise SubmissionError("contest config directory must be an absolute path")
+    resolved = path.resolve(strict=False)
+    if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
+        raise SubmissionError("contest config directory must be outside the repository")
+    return resolved
+
+
+def _normalize_contest_url(url: str) -> str:
+    value = url.strip()
+    parsed = urllib.parse.urlsplit(value)
+    normalized_path = "/" + parsed.path.lstrip("/")
+    normalized = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, normalized_path, parsed.query, "")
+    )
+    _validate_contest_url(normalized)
+    return normalized
+
+
+def _read_contest_url(path: Path) -> str:
+    if not path.is_file():
+        raise SubmissionError(
+            f"contest URL was not provided and config file does not exist: {path}"
+        )
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SubmissionError(f"could not read contest URL config: {path}") from exc
+    if not value:
+        raise SubmissionError(f"contest URL config is empty: {path}")
+    return _normalize_contest_url(value)
+
+
+def _save_contest_url(config_dir: Path, url: str) -> Path:
+    normalized = _normalize_contest_url(url)
+    config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(config_dir, 0o700)
+    path = config_dir / CONTEST_URL_FILENAME
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(normalized + "\n")
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        raise SubmissionError(f"could not save contest URL config: {path}") from exc
+    return path
 
 
 def _load_cookie_jar(path: Path) -> http.cookiejar.MozillaCookieJar:
@@ -195,6 +254,7 @@ def _validate_contest_url(url: str) -> tuple[str, str]:
 def discover_contract(
     opener: urllib.request.OpenerDirector, contest_url: str
 ) -> SubmitContract:
+    contest_url = _normalize_contest_url(contest_url)
     expected_contest_id, expected_task_id = _validate_contest_url(contest_url)
     page = _decode_page(_request(opener, contest_url, label="contest page"))
     if "/login/loginproc.jsp?logout=true" not in page:
@@ -509,11 +569,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Discover, inspect, or explicitly submit to CourseGrading."
     )
-    parser.add_argument("--contest-url", required=True, help="authenticated contest task URL")
     parser.add_argument(
-        "--cookie-file", required=True, type=Path, help="0600 Netscape cookie file"
+        "--config-dir",
+        type=Path,
+        help=(
+            "persistent config directory; defaults to $BISHENG_CONTEST_CONFIG_DIR "
+            "or ~/.config/bisheng-contest"
+        ),
+    )
+    parser.add_argument(
+        "--contest-url",
+        help="authenticated contest task URL; overrides config/contest_url.txt",
+    )
+    parser.add_argument(
+        "--cookie-file",
+        type=Path,
+        help="0600 Netscape cookie file; defaults to config/course.cookies.txt",
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
+    configure_parser = subparsers.add_parser(
+        "configure", help="validate and persist the contest task URL"
+    )
+    configure_parser.add_argument("url", nargs="?", help="contest task URL to save")
     subparsers.add_parser("discover", help="discover safe public interface metadata")
 
     status_parser = subparsers.add_parser("status", help="read the latest judge result")
@@ -532,13 +609,42 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    config_dir = _resolve_config_dir(args.config_dir)
+    if args.action == "configure":
+        contest_url = args.url or args.contest_url
+        if not contest_url:
+            raise SubmissionError("configure requires a contest task URL")
+        path = _save_contest_url(config_dir, contest_url)
+        print(
+            json.dumps(
+                {
+                    "contest_config": {
+                        "config_dir": str(config_dir),
+                        "contest_url_file": str(path),
+                        "cookie_file": str(config_dir / COOKIE_FILENAME),
+                    }
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
     if getattr(args, "timeout", 1) <= 0:
         raise SubmissionError("--timeout must be positive")
     if getattr(args, "poll_interval", 2) < 2:
         raise SubmissionError("--poll-interval must be at least 2 seconds")
-    jar = _load_cookie_jar(args.cookie_file)
+    contest_url = (
+        _normalize_contest_url(args.contest_url)
+        if args.contest_url
+        else _read_contest_url(config_dir / CONTEST_URL_FILENAME)
+    )
+    cookie_file = (
+        args.cookie_file.expanduser()
+        if args.cookie_file
+        else config_dir / COOKIE_FILENAME
+    )
+    jar = _load_cookie_jar(cookie_file)
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    contract = discover_contract(opener, args.contest_url)
+    contract = discover_contract(opener, contest_url)
     if args.action == "discover":
         print(json.dumps({"submit_contract": contract.public_dict()}, ensure_ascii=False))
         return 0
