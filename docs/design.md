@@ -182,6 +182,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - 当前 DAG 作用域是 panel-local；`wait` 确认 DAG 节点全部完成后会清理已完成节点和 latest-producer 表，profile 计数保留到 `end` 汇报。
 - `end` 做最终等待并重置本轮 arena，不销毁可复用 worker 池。
 - ready queue、DAG node vector、latest-producer 表和批量提交状态的 reset 在 runtime mutex 下执行，避免 worker 池复用时清理调度状态和 worker 观察队列状态并发。
+- 依赖释放和 submit flush 使用 `notifyWorkers(count)` 定向唤醒：按新就绪任务数调用相应次数 `notify_one`，只有 `count` 不小于 worker 数时才退化为 `notify_all`，避免每次释放事件产生 O(participants) 次无效 futex 唤醒。停机路径仍使用 `notify_all`。欠唤醒是安全的：每个参与者完成一批后都会重新求值就绪谓词。
 - worker 池按当前问题规模和 `COMPILER2026_DAG_THREADS` 选择线程数；线程数变化时才重建。
 - `COMPILER2026_DAG_PIN_WORKERS=1` 是默认关闭的 Linux worker 亲和性实验：runtime 从当前进程 affinity mask 读取可用 CPU，并把 worker thread 轮转绑定到这些 CPU；非 Linux 或 affinity 读取失败时自动退化为不绑定。该机制只影响线程放置，不改变 DAG 依赖、ready queue 或 task function。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。

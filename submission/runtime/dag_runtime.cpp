@@ -364,6 +364,26 @@ public:
         return memory;
     }
 
+    // Wake at most one worker per newly ready task instead of storming the
+    // whole pool. notify_all costs O(participants) futex wakeups per release
+    // event while at most `count` of the woken threads can find work; the rest
+    // re-acquire the shared mutex only to re-check the predicate and park
+    // again. Under-waking is safe: every participant re-evaluates
+    // hasReadyTasksLocked() after finishing a batch, and submit-side flushes
+    // notify independently.
+    void notifyWorkers(std::size_t count) {
+        if (count == 0) {
+            return;
+        }
+        if (count >= workers_.size()) {
+            work_cv_.notify_all();
+            return;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            work_cv_.notify_one();
+        }
+    }
+
     void wait() {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
@@ -417,7 +437,7 @@ public:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (!hasReadyTasksLocked() && active_tasks_ == 0) {
                     done_cv_.notify_all();
@@ -502,7 +522,7 @@ public:
                     recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                     recordDagReleaseBatchLocked(released);
                     if (released > 0) {
-                        work_cv_.notify_all();
+                        notifyWorkers(released);
                     }
                     if (key_waiters_ > 0 ||
                         (!hasReadyTasksLocked() && active_tasks_ == 0)) {
@@ -579,7 +599,7 @@ private:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, true);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (key_waiters_ > 0 ||
                     (!hasReadyTasksLocked() && active_tasks_ == 0)) {
@@ -594,6 +614,7 @@ private:
             return;
         }
 
+        const std::size_t flushed = pending_count_;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.insert(tasks_.end(), pending_tasks_.begin(),
@@ -604,7 +625,7 @@ private:
             }
         }
         pending_count_ = 0;
-        work_cv_.notify_all();
+        notifyWorkers(flushed);
     }
 
     std::size_t normalReadyCountLocked() const {
@@ -786,7 +807,7 @@ private:
                 recordBatchProfileLocked(batch.data(), batch_count, profile, false);
                 recordDagReleaseBatchLocked(released);
                 if (released > 0) {
-                    work_cv_.notify_all();
+                    notifyWorkers(released);
                 }
                 if (key_waiters_ > 0 ||
                     (!hasReadyTasksLocked() && active_tasks_ == 0)) {
