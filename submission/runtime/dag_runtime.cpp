@@ -27,7 +27,7 @@
 namespace {
 
 using TaskFn = void (*)(void *);
-constexpr std::size_t kMaxTaskBatch = 16;
+constexpr std::size_t kMaxTaskBatch = 32;
 constexpr std::size_t kMaxProfiledTasks = 8;
 // Upper bound on how many dependency-aware submits the submitting thread may
 // stage before publishing them under one lock acquisition.
@@ -1408,9 +1408,9 @@ std::size_t selectTaskBatchSize(int n, int b, std::size_t worker_threads) {
 
     std::size_t batch = 1;
     if (b <= 64) {
-        batch = 8;
+        batch = 16;
     } else if (b <= 128) {
-        batch = 4;
+        batch = 8;
     }
 
     // Batch size is purely a task-granularity decision: small tiles make the
