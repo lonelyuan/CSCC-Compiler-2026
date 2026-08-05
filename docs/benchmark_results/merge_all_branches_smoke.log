@@ -1,0 +1,28 @@
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /root/bisheng/build/submission_bisheng
+ninja: no work to do.
+Built submission artifacts:
+  /root/bisheng/build/submission_bisheng/pass/libcontestant_pass.so
+  /root/bisheng/build/submission_bisheng/runtime/libcontestant_runtime.a
+  /root/bisheng/build/submission_bisheng/manifest.json
+serial_seconds=2.002135908
+contestant_seconds=0.644431280
+speedup=3.107x
+contestant_app=/root/bisheng/build/smoke_submission/bin/contestant_app
+serial_verify=/root/bisheng/build/smoke_submission/serial.verify
+contestant_verify=/root/bisheng/build/smoke_submission/contestant.verify
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /root/bisheng/build/submission_bisheng
+ninja: no work to do.
+Built submission artifacts:
+  /root/bisheng/build/submission_bisheng/pass/libcontestant_pass.so
+  /root/bisheng/build/submission_bisheng/runtime/libcontestant_runtime.a
+  /root/bisheng/build/submission_bisheng/manifest.json
+serial_seconds=2.024586978
+contestant_seconds=0.793929265
+speedup=2.550x
+contestant_app=/root/bisheng/build/smoke_submission/bin/contestant_app
+serial_verify=/root/bisheng/build/smoke_submission/serial.verify
+contestant_verify=/root/bisheng/build/smoke_submission/contestant.verify

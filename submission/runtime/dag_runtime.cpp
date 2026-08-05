@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
+#include <deque>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -55,6 +56,13 @@ bool profileEnabledFromEnv() {
 
 bool workerPinningEnabledFromEnv() {
     const char *env = std::getenv("COMPILER2026_DAG_PIN_WORKERS");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+// Opt-in experimental scheduler: per-worker deques with work stealing instead
+// of the single global ready queue. Default off keeps the validated path.
+bool workStealingEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_DAG_WORK_STEALING");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
@@ -193,6 +201,13 @@ class AsyncRuntime {
         std::array<bool, kMaxDeps> dep_first_touch{};
     };
 
+    // One work-stealing ready shard per possible participant (main + workers).
+    // Only the prefix selected by activeParticipants() is used for a call.
+    struct WsDeque {
+        std::mutex mutex;
+        std::deque<Task> tasks;
+    };
+
     static constexpr int kDepSkip = -1;
     static constexpr int kDepMissing = -2;
 
@@ -202,8 +217,12 @@ public:
           pin_workers_(workerPinningEnabledFromEnv()),
           worker_cpus_(pin_workers_ ? allowedCpuList() : std::vector<int>{}),
           fast_worker_states_(worker_count) {
+        work_stealing_ = workStealingEnabledFromEnv();
         if (worker_count == 0) {
             return;
+        }
+        if (work_stealing_) {
+            ws_queues_ = std::vector<WsDeque>(worker_count + 1);
         }
         workers_.reserve(worker_count);
         for (std::size_t i = 0; i < worker_count; ++i) {
@@ -243,6 +262,7 @@ public:
         }
         work_cv_.notify_all();
         park_cv_.notify_all();
+        ws_start_cv_.notify_all();
         for (auto &worker : workers_) {
             worker.join();
         }
@@ -259,7 +279,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             active_workers_ =
                 std::min(total_threads > 1 ? total_threads - 1 : 0, workers_.size());
-            fast_phase_enabled_ = fastPhaseEnabledForTile(b);
+            fast_phase_enabled_ = !work_stealing_ && fastPhaseEnabledForTile(b);
             idle_spin_iterations_.store(
                 idleSpinIterations(fast_phase_enabled_), std::memory_order_relaxed);
         }
@@ -329,6 +349,15 @@ public:
         dag_staging_limit_ = chooseDagStagingLimit(reserve_tasks);
         dag_staging_.reserve(dag_staging_limit_);
         worker_error_ = nullptr;
+        if (work_stealing_) {
+            ws_initial_ready_.clear();
+            ws_node_tasks_.clear();
+            ws_outstanding_.store(0, std::memory_order_relaxed);
+            for (WsDeque &shard : ws_queues_) {
+                std::lock_guard<std::mutex> shard_lock(shard.mutex);
+                shard.tasks.clear();
+            }
+        }
     }
 
     // How many dependency-aware submits to withhold before publishing them
@@ -383,6 +412,10 @@ public:
     void submit(TaskFn fn, void *context) {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         Task task{fn, context, profiling ? nowNs() : 0};
+        if (work_stealing_) {
+            submitWorkStealing(task, nullptr, 0, -1);
+            return;
+        }
         if (activeWorkerCount() == 0) {
             BatchProfile profile = runBatch(&task, 1, profiling);
             if (profiling) {
@@ -442,7 +475,9 @@ public:
             task.range_fn = fn;
             task.begin = begin;
             task.end = end;
-            if (activeWorkerCount() == 0) {
+            if (work_stealing_) {
+                submitWorkStealing(task, nullptr, 0, -1);
+            } else if (activeWorkerCount() == 0) {
                 BatchProfile profile = runBatch(&task, 1, profiling);
                 if (profiling) {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -534,6 +569,11 @@ public:
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint8_t task_priority = static_cast<std::uint8_t>(
             critical_priority_enabled_ ? std::max(0, std::min(priority, 3)) : 0);
+        if (work_stealing_) {
+            Task task{fn, context, profiling ? nowNs() : 0, -1, task_priority};
+            submitWorkStealing(task, deps, dep_count, output);
+            return;
+        }
         if (activeWorkerCount() == 0) {
             Task task{fn, context, profiling ? nowNs() : 0, -1, task_priority};
             BatchProfile profile = runBatch(&task, 1, profiling);
@@ -772,6 +812,10 @@ public:
     }
 
     void wait() {
+        if (work_stealing_) {
+            waitWorkStealing();
+            return;
+        }
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
         if (tryRunPendingFastPhase(profiling, wait_enter_ns)) {
@@ -847,6 +891,12 @@ public:
 
     __attribute__((noinline, cold)) void waitForKey(int key) {
         if (key < 0) {
+            return;
+        }
+        if (work_stealing_) {
+            // This experimental scheduler builds one immutable DAG before each
+            // drain. A full drain is a conservative replacement for wait_key.
+            waitWorkStealing();
             return;
         }
 
@@ -1079,6 +1129,10 @@ private:
     }
 
     void workerLoop(std::size_t worker_index) {
+        if (work_stealing_) {
+            workerLoopWorkStealing(worker_index);
+            return;
+        }
         pinCurrentWorker(worker_index);
         std::uint64_t seen_fast_phase =
             fast_phase_epoch_.load(std::memory_order_acquire);
@@ -1201,6 +1255,280 @@ private:
                 if (key_waiters_ > 0 ||
                     (!hasReadyTasksLocked() && active_tasks_ == 0)) {
                     done_cv_.notify_all();
+                }
+            }
+        }
+    }
+
+    // ---- Work-stealing path (opt-in, default off) -------------------------
+    //
+    // The submitting thread builds an immutable DAG while workers are parked.
+    // A drain only mutates per-node atomic pending counters and per-participant
+    // ready deques. This remains an experiment; the validated lock-free phase
+    // path above is unchanged unless COMPILER2026_DAG_WORK_STEALING=1 is set.
+    void submitWorkStealing(const Task &task, const int *deps,
+                            std::size_t dep_count, int output) {
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        if (activeWorkerCount() == 0) {
+            BatchProfile profile = runBatch(&task, 1, profiling);
+            if (profiling) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                recordBatchProfileLocked(&task, 1, profile, false);
+            }
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int node_index = static_cast<int>(dag_nodes_.size());
+        dag_nodes_.push_back(
+            {task.fn, task.context, 0, false, task.priority, -1, -1, 0});
+        ws_node_tasks_.push_back(task);
+
+        for (std::size_t i = 0; i < dep_count; ++i) {
+            const int dep = deps[i];
+            if (dep < 0) {
+                continue;
+            }
+            bool duplicate = false;
+            for (std::size_t previous = 0; previous < i; ++previous) {
+                if (deps[previous] == dep) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+
+            const auto producer = latest_producer_.find(dep);
+            if (producer == latest_producer_.end()) {
+                continue;
+            }
+            const int edge_index = static_cast<int>(successor_edges_.size());
+            successor_edges_.push_back({node_index, -1});
+            DagNode &producer_node =
+                dag_nodes_[static_cast<std::size_t>(producer->second)];
+            if (producer_node.last_successor >= 0) {
+                successor_edges_[static_cast<std::size_t>(
+                                     producer_node.last_successor)]
+                    .next = edge_index;
+            } else {
+                producer_node.first_successor = edge_index;
+            }
+            producer_node.last_successor = edge_index;
+            ++producer_node.successor_count;
+            ++dag_nodes_[static_cast<std::size_t>(node_index)].pending;
+        }
+
+        if (output >= 0) {
+            latest_producer_[output] = node_index;
+        }
+        if (dag_nodes_[static_cast<std::size_t>(node_index)].pending == 0) {
+            ws_initial_ready_.push_back(node_index);
+        }
+    }
+
+    void waitWorkStealing() {
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
+        std::size_t count = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            count = dag_nodes_.size();
+            if (count == 0) {
+                return;
+            }
+            if (profiling) {
+                recordWaitEntryLocked();
+            }
+            if (count > ws_pending_capacity_) {
+                ws_pending_.reset(new std::atomic<int>[count]);
+                ws_pending_capacity_ = count;
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                ws_pending_[i].store(dag_nodes_[i].pending,
+                                     std::memory_order_relaxed);
+            }
+            ws_outstanding_.store(count, std::memory_order_relaxed);
+
+            const std::size_t participants = activeParticipants();
+            for (std::size_t i = 0; i < ws_initial_ready_.size(); ++i) {
+                const int node_index = ws_initial_ready_[i];
+                Task ready = ws_node_tasks_[static_cast<std::size_t>(node_index)];
+                ready.dag_node = node_index;
+                WsDeque &shard = ws_queues_[i % participants];
+                std::lock_guard<std::mutex> shard_lock(shard.mutex);
+                shard.tasks.push_back(ready);
+            }
+            ws_initial_ready_.clear();
+            ws_epoch_.fetch_add(1, std::memory_order_seq_cst);
+            ws_running_.store(true, std::memory_order_seq_cst);
+        }
+        ws_start_cv_.notify_all();
+
+        driveWorkStealing(0);
+
+        std::exception_ptr error;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ws_running_.store(false, std::memory_order_seq_cst);
+            ws_done_cv_.wait(lock, [this]() { return ws_active_workers_ == 0; });
+            clearCompletedDagStateLocked();
+            ws_node_tasks_.clear();
+            if (worker_error_) {
+                error = worker_error_;
+                worker_error_ = nullptr;
+            }
+        }
+        recordWaitProfile(profiling, wait_enter_ns);
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
+
+    void driveWorkStealing(std::size_t participant) {
+        constexpr int kSpinLimit = 256;
+        const std::size_t batch_limit =
+            std::max<std::size_t>(1, std::min(task_batch_size_, kMaxTaskBatch));
+        std::array<Task, kMaxTaskBatch> batch{};
+        int idle_spins = 0;
+        while (true) {
+            const std::uint64_t sequence_before =
+                ws_push_sequence_.load(std::memory_order_seq_cst);
+            std::size_t count =
+                popLocalWorkStealingBatch(participant, batch.data(), batch_limit);
+            if (count == 0 && stealWorkStealingTask(participant, batch[0])) {
+                count = 1;
+            }
+            if (count != 0) {
+                idle_spins = 0;
+                const bool profiling =
+                    profile_enabled_.load(std::memory_order_relaxed);
+                BatchProfile profile = runBatch(batch.data(), count, profiling);
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (batch[i].dag_node >= 0) {
+                        releaseWorkStealingSuccessors(batch[i].dag_node,
+                                                      participant);
+                    }
+                }
+                if (profiling) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    recordBatchProfileLocked(batch.data(), count, profile,
+                                             participant != 0);
+                }
+                // Successors are published before the completed tasks are
+                // subtracted, so zero cannot be observed while work is pending.
+                if (ws_outstanding_.fetch_sub(count, std::memory_order_seq_cst) ==
+                    count) {
+                    std::lock_guard<std::mutex> lock(ws_idle_mutex_);
+                    ws_idle_cv_.notify_all();
+                }
+                continue;
+            }
+
+            if (ws_outstanding_.load(std::memory_order_seq_cst) == 0) {
+                return;
+            }
+            if (++idle_spins < kSpinLimit) {
+                std::this_thread::yield();
+                continue;
+            }
+            {
+                std::unique_lock<std::mutex> lock(ws_idle_mutex_);
+                ws_sleepers_.fetch_add(1, std::memory_order_seq_cst);
+                if (ws_outstanding_.load(std::memory_order_seq_cst) != 0 &&
+                    ws_push_sequence_.load(std::memory_order_seq_cst) ==
+                        sequence_before) {
+                    ws_idle_cv_.wait_for(lock, std::chrono::milliseconds(2));
+                }
+                ws_sleepers_.fetch_sub(1, std::memory_order_seq_cst);
+            }
+            idle_spins = 0;
+        }
+    }
+
+    void releaseWorkStealingSuccessors(int node_index,
+                                       std::size_t participant) {
+        const DagNode &node = dag_nodes_[static_cast<std::size_t>(node_index)];
+        for (int edge_index = node.first_successor; edge_index >= 0;) {
+            const DagEdge &edge =
+                successor_edges_[static_cast<std::size_t>(edge_index)];
+            edge_index = edge.next;
+            const int successor = edge.successor;
+            if (ws_pending_[static_cast<std::size_t>(successor)].fetch_sub(
+                    1, std::memory_order_seq_cst) == 1) {
+                Task ready = ws_node_tasks_[static_cast<std::size_t>(successor)];
+                ready.dag_node = successor;
+                ready.enqueue_ns = profile_enabled_.load(std::memory_order_relaxed)
+                                       ? nowNs()
+                                       : 0;
+                {
+                    WsDeque &shard = ws_queues_[participant];
+                    std::lock_guard<std::mutex> shard_lock(shard.mutex);
+                    shard.tasks.push_back(ready);
+                }
+                ws_push_sequence_.fetch_add(1, std::memory_order_seq_cst);
+                if (ws_sleepers_.load(std::memory_order_seq_cst) > 0) {
+                    std::lock_guard<std::mutex> lock(ws_idle_mutex_);
+                    ws_idle_cv_.notify_one();
+                }
+            }
+        }
+    }
+
+    std::size_t popLocalWorkStealingBatch(std::size_t participant, Task *output,
+                                          std::size_t limit) {
+        WsDeque &own = ws_queues_[participant];
+        std::lock_guard<std::mutex> lock(own.mutex);
+        std::size_t count = 0;
+        while (count < limit && !own.tasks.empty()) {
+            output[count++] = own.tasks.back();
+            own.tasks.pop_back();
+        }
+        return count;
+    }
+
+    bool stealWorkStealingTask(std::size_t participant, Task &output) {
+        const std::size_t participants = activeParticipants();
+        for (std::size_t offset = 1; offset < participants; ++offset) {
+            WsDeque &victim = ws_queues_[(participant + offset) % participants];
+            std::unique_lock<std::mutex> lock(victim.mutex, std::try_to_lock);
+            if (lock.owns_lock() && !victim.tasks.empty()) {
+                output = victim.tasks.front();
+                victim.tasks.pop_front();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void workerLoopWorkStealing(std::size_t worker_index) {
+        pinCurrentWorker(worker_index);
+        const std::size_t participant = worker_index + 1;
+        std::uint64_t seen_epoch = 0;
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                ws_start_cv_.wait(lock, [this, worker_index, seen_epoch]() {
+                    return stopping_ ||
+                           (worker_index < activeWorkerCount() &&
+                            ws_running_.load(std::memory_order_seq_cst) &&
+                            ws_epoch_.load(std::memory_order_seq_cst) !=
+                                seen_epoch);
+                });
+                if (stopping_) {
+                    return;
+                }
+                seen_epoch = ws_epoch_.load(std::memory_order_seq_cst);
+                ++ws_active_workers_;
+            }
+
+            driveWorkStealing(participant);
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (--ws_active_workers_ == 0) {
+                    ws_done_cv_.notify_all();
                 }
             }
         }
@@ -1754,6 +2082,24 @@ private:
     bool pin_workers_ = false;
     std::vector<int> worker_cpus_;
     std::vector<FastWorkerState> fast_worker_states_;
+
+    // Opt-in work-stealing state. The validated default path never touches it.
+    bool work_stealing_ = false;
+    std::vector<WsDeque> ws_queues_;
+    std::vector<int> ws_initial_ready_;
+    std::vector<Task> ws_node_tasks_;
+    std::unique_ptr<std::atomic<int>[]> ws_pending_;
+    std::size_t ws_pending_capacity_ = 0;
+    std::atomic<std::size_t> ws_outstanding_{0};
+    std::atomic<bool> ws_running_{false};
+    std::atomic<std::uint64_t> ws_epoch_{0};
+    std::size_t ws_active_workers_ = 0;
+    std::condition_variable ws_start_cv_;
+    std::condition_variable ws_done_cv_;
+    std::mutex ws_idle_mutex_;
+    std::condition_variable ws_idle_cv_;
+    std::atomic<int> ws_sleepers_{0};
+    std::atomic<std::uint64_t> ws_push_sequence_{0};
 };
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;

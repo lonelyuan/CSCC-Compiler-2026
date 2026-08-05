@@ -1147,6 +1147,33 @@
 - 删除 completed latest producer 虽然降低了 `max_dag_live`，但大量后续依赖会从 satisfied completed producer 变成 missing producer，破坏当前 profile 语义，也没有带来性能收益。
 - 代码改动已回退，只保留 CSV 和日志。后续如果要缩 producer 表，应单独维护 completed-producer cache 或 profile 语义，而不是直接 erase latest producer。
 
+## 2026-06-08 宿主机调度可行性 harness + 跨 panel/work-stealing 多核研究
+
+背景：
+
+- 4-vCPU VM 无法暴露大核数调度收益。本轮在本机 Apple M5（10 核：4 P + 6 E）上做调度机制可行性验证，目标是回答“最大优化（跨 panel DAG 去 panel barrier）和 work-stealing 在核数大于 4 时是否成立”，因为 4 核平台结构上看不到收益。
+- 真实测试平台（鲲鹏 920 48/64 核）后续开放；M5 是 ARM 同 ISA 但 macOS/Apple clang、无毕昇/SDK，且 P/E 异构、核数仍远小于鲲鹏。结论只作为调度机制可行性证据，不作为正式性能事实。
+
+改动：
+
+- 新增本机调度 harness `tools/sched_harness/sched_bench.cpp`（仅调试用，不在 `submission/`，不影响评测包）。它直接链接真实 `submission/runtime/dag_runtime.cpp`，按 Pass 的依赖键复刻分块 Cholesky 的 panel-barrier 与 cross-panel(sync-cholesky) 任务 DAG，使用真实 `b×b` 块计算（b=32 时每个 madd 约 6µs，与 VM profile 同量级），通过真实 runtime API 跑 1..10 线程扫描。harness 自带正确性闸：每次运行校验“每个 task 恰好执行一次”和块 checksum 稳定。
+- runtime 新增 opt-in `COMPILER2026_DAG_WORK_STEALING=1`：per-worker deque + work stealing，默认关闭。设计约束：DAG 在提交阶段单线程构建（worker 全部 park），drain 阶段只改 per-node 原子 pending 计数和分片 deque（successor 边在 drain 期间不可变），终止用单个原子 outstanding 计数归零；空闲采用“有界自旋后 CV 睡眠 + push 序号防丢唤醒”。该路径只服务 panel-barrier 调度；与 cross-panel `wait_key` 不兼容时退化为一次完整 drain（保守正确）。
+
+经验（本机 M5，单位为同一 harness 下的 wall ms 比值，非 VM/鲲鹏性能事实）：
+
+- 跨 panel DAG 收益随核数单调增长，并满足 `收益 ∝ 核数 / 每矩阵 block 数`：64 blocks(n=2048) 10 线程 `cross/bar≈0.98`（基本持平，核数≪blocks）；32 blocks(n=1024) 10 线程 `0.886`（cross 快约 11%）；16 blocks(n=512) 10 线程 `≈0.85`（快约 15%）。1–2 线程处处持平。这解释了 4 核 VM 上跨 panel 必然看不到收益且会被开销拖成回退，并预测鲲鹏 48/64 核（核数≳block 数的公开/中等矩阵）跨 panel 收益显著。
+- work-stealing 原型：2–3 线程更快（局部性 + 无全局锁，`WS/SQ≈0.74–0.94`），但 4–10 线程慢于已调优的单全局队列（`WS/SQ≈1.2–1.5`）。依次尝试阻塞式空闲、push 序号精确唤醒、分片批量出队三项公平性修正后结论不变。原因：≤10 核、~6µs task 下中心队列锁尚未饱和，单队列的批量出队 + 主线程参与带来的动态负载均衡更廉价；WS 还损失了 panel 内 submit/exec overlap，并有窃取不均衡开销。work-stealing 的收益要等中心锁真正饱和（更高核数或更细 task）。
+
+结论与方向：
+
+- 这是 Round 17 持久无锁 phase 之前的历史结论。后续目标机证据已证明相位 ready queue 争用可由无锁 session 更低成本地消除，当前优化优先级以 `docs/roadmap.md` 开头的 Round 27 结论为准。
+- work-stealing 保持 opt-in/默认关闭的实验形态；生产版需要 submit/exec overlap 与批量窃取才可能在中等核数追平中心队列。
+
+验证：
+
+- 本机：`clang++ -std=c++17 -O2 -pthread` 链接 runtime + harness 通过；ThreadSanitizer 构建下 WS 路径无 data race 警告，正确性闸 `exec=tasks` 且 checksum 与单队列一致。
+- 早期 4 核 VM（openEuler aarch64 / 毕昇 LLVM 15.0.4）：默认路径和 `COMPILER2026_DAG_WORK_STEALING=1` 均通过所测范围 verifier；该证据早于当前 range task/持久无锁 phase 实现，合并后的兼容性需要重新验证。
+
 ## 2026-07-17 annotation-driven tile semantics and ranked ready queue experiment
 
 改动：
@@ -2814,3 +2841,53 @@ Round 27 分桶为 `7.833x / 9.740x / 8.126x / 3.896x`（`b<12`、`12<=b<32`、
   1.0019x 和小 tile 两个受影响组的同向收益，才使结论可靠。
 - 该改动把总分提高约 0.71 分，但距离 60 分所需 10.667x 仍差 **1.444x**；不能把减少 TRSM
   提交成本误判为已经解决所有 per-panel 固定延迟。
+
+## 2026-08-05 主工作树统一与历史 work-stealing 原型兼容
+
+### 合并范围
+
+- Orca 确认真正的主工作树是 `/Users/chenzhongyuan/Documents/bisheng`（`main`）；
+  `/Users/chenzhongyuan/APP/orca/bisheng/pilotfish` 是独立 worktree。
+- `main` 保留 versioned deliverable workflow 和未跟踪的 pre-submit AArch64 CSV；随后合入
+  `pilotfish` 的持久无锁 phase、二维 MADD tiling、TRSM range outlining 及 Round 17–27 证据。
+- 历史分支 `sched-work-stealing` 基于旧提交 `663d7a6`，不能用旧 runtime 覆盖当前实现。
+  本次以三方 merge 保留分支祖先关系，并把它的 harness 与默认关闭的 scheduler 原型移植到
+  Round 27 runtime。
+
+### 兼容修正
+
+- `COMPILER2026_DAG_WORK_STEALING=1` 仍由每 participant deque、LIFO 本地批量领取、FIFO 窃取、
+  per-node atomic pending 和单一 outstanding counter 驱动；未设置时不进入该路径。
+- 旧原型只认识 scalar `TaskFn`，与当前 TRSM/MADD range task 直接合并会在 `wait()` 时遗漏
+  `pending_tasks_`。现在 work-stealing DAG 以并行 `Task` 表保留 scalar/range 两种 task，
+  `runBatch()` 统一执行 ABI task 或 `[begin,end)` range。
+- 旧原型使用整个进程级 worker pool；当前 runtime 会跨用例动态 park surplus worker。窃取队列
+  分发、victim 扫描和 worker 启动门均改为只使用 `activeParticipants()`，避免绕过线程上限。
+- `wait_key` 在该历史实验路径中仍保守退化为完整 drain；持久无锁 phase 只用于默认路径。
+
+### 验证
+
+本机无 CMake，但直接链接真实 runtime 的 harness 构建通过：
+
+```bash
+clang++ -std=c++17 -O2 -pthread submission/runtime/dag_runtime.cpp \
+  tools/sched_harness/sched_bench.cpp -o build/sched_harness/sched_bench
+COMPILER2026_DAG_THREADS=4 build/sched_harness/sched_bench 512 32 2 4
+COMPILER2026_DAG_THREADS=4 COMPILER2026_DAG_WORK_STEALING=1 \
+  build/sched_harness/sched_bench 512 32 2 4
+```
+
+默认和 WS 两条路径的 1/4-thread correctness gate 均执行 `800/800` task，checksum 均为
+`4.423412e+04`。
+
+AArch64 远端先完成 submission clean build，再运行：
+
+```bash
+./scripts/cg_run.sh merge_all_branches_smoke \
+  'cd /root/bisheng && SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=40 ./submission/scripts/smoke_test.sh && COMPILER2026_DAG_WORK_STEALING=1 SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=40 ./submission/scripts/smoke_test.sh'
+```
+
+命令链退出码 `0`；默认路径 `3.107x`，WS 实验路径 `2.550x`，两次 verifier 均通过。
+WS 的性能方向与历史结论一致，因此仍默认关闭。证据：
+`merge_all_branches_smoke.log`、`merge_all_branches_smoke.done`。本节只证明合并兼容性；
+合并 commit 没有重新跑 150-case 全量，所以不借用 Round 27 的 `53.85` 作为该 commit 的新成绩。

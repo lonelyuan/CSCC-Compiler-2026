@@ -45,6 +45,8 @@
 │   ├── compiler-contest-assistant/
 │   ├── cloud-desktop-evaluation/
 │   └── contest-submission/
+├── tools/
+│   └── sched_harness/        # runtime 调度机制实验，不进入提交包
 ├── contestant_sdk/
 ├── build/
 └── dist/
@@ -76,6 +78,8 @@
 - `scripts/contest_submit.py`：动态发现 CourseGrading 正式提交接口，校验 zip、执行一次已授权上传并轮询新评测结果。
 - `requirements-cloud-desktop.txt`：RFB 协议客户端的隔离 Python 依赖；日常构建不需要安装。
 - `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
+- `tools/sched_harness/`：链接真实 runtime 的宿主机调度正确性/扩展性 harness；用于验证默认关闭的
+  `COMPILER2026_DAG_WORK_STEALING=1` 实验路径，不进入评测提交包。
 - `dist/`：本地打包输出目录，包含 `submission.zip` 等提交包。
 
 ## Codex Skill

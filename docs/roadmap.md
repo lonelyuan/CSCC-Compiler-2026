@@ -278,6 +278,8 @@ trsm(r, p+1) depends on updates to block (r, p+1)
 
 当前提交已经先落地了一层轻量缓解：runtime 对小/中等 `b` 使用默认上限为 `8` 的小批量提交和批量出队，降低公开 VM 上 `madd` 密集阶段的锁竞争。`COMPILER2026_DAG_PIN_WORKERS=1` 提供默认关闭的 Linux worker 亲和性实验入口，可在真实目标机上和线程数、NUMA 绑定一起测试；后续在 32 核以上平台仍应继续评估 per-worker deque、work stealing 和 NUMA-aware placement。
 
+历史原型 `COMPILER2026_DAG_WORK_STEALING=1` 提供 per-worker deque + 窃取，默认关闭，只服务 panel-barrier 调度；本机 M5（10 核）harness 和早期 4 核 VM 已验证正确性，但 4–10 线程慢于当时的单队列默认。Round 17 后，默认路径已用持久无锁 phase 消除细粒度 task 的共享 ready queue 竞争，因此该原型只作为 `tools/sched_harness/` 调度研究入口保留，不能据此重新把换队列列为当前首要路线。
+
 ## 需要调研的方向
 
 优先调研以下关键词和系统：

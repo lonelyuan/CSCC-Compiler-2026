@@ -210,6 +210,7 @@ Runtime 内部维护一个 thread-local `AsyncRuntime`：
 - 依赖释放和 submit flush 使用 `notifyWorkers(count)` 定向唤醒：按新就绪任务数调用相应次数 `notify_one`，只有 `count` 不小于 worker 数时才退化为 `notify_all`，避免每次释放事件产生 O(participants) 次无效 futex 唤醒。停机路径仍使用 `notify_all`。欠唤醒是安全的：每个参与者完成一批后都会重新求值就绪谓词。
 
 - `COMPILER2026_DAG_PIN_WORKERS=1` 是默认关闭的 Linux worker 亲和性实验：runtime 从当前进程 affinity mask 读取可用 CPU，并把 worker thread 轮转绑定到这些 CPU；非 Linux 或 affinity 读取失败时自动退化为不绑定。该机制只影响线程放置，不改变 DAG 依赖、ready queue 或 task function。
+- `COMPILER2026_DAG_WORK_STEALING=1` 是默认关闭的 per-worker deque + work-stealing 实验路径：DAG 在提交阶段单线程构建，drain 阶段用 per-node 原子 pending 计数、不可变 successor 边和分片 deque（本地 LIFO 批量出队 + 跨 shard FIFO 窃取），空闲时有界自旋后 CV 睡眠并以 push 序号防丢唤醒，终止用单原子 outstanding 计数。它只服务默认 panel-barrier 调度；与跨 panel `runtime_wait_key` 同时启用时，`wait_key` 退化为一次完整 drain（保守正确）。默认关闭时仍走当前已验证的持久无锁 phase/全局队列组合路径。当前本机 M5 与早期 4 核 VM 上未超过当时的单队列默认；该原型保留为调度研究入口，不改变 Round 17–27 的默认路线，详见 `docs/engineering_log.md` 与 `tools/sched_harness/`。
 - task context 使用 per-call arena 分配，避免每个 task 单独 `malloc/free`。
 - runtime 按首个 panel 的 `trsm + madd` 任务数预估 panel-local task 容量，并复用 ready queue、DAG node vector 和 latest-producer hash table 的容量。
 - DAG successor 边使用 runtime 统一的连续 edge pool；每个 producer node 只保存 successor 链表的 head/tail 和计数，避免为高 fanout `trsm` producer 维护大量独立小 vector。
