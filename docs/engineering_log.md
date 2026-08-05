@@ -1878,24 +1878,30 @@ geomean **0.9916x**，其中 `b<12` 桶 **0.93x**（`docs/benchmark_results/r9_a
 推论（后续所有实验都受这条约束）：**本机任何 `b=8` 的测量都带 ±10% 的布局分量，
 单次构建的 b=8 结论不可信**，必须跨 padding 或跨构建取分布。
 
-### 保留的两处 Pass 改动
+### 两处 Pass 改动:已回退,不入库
 
-两处改动都没能拿回 b=8 的数字，但仍然保留，理由是修了真 bug 且零成本：
+沿"Pass 让串行路径变差"这条线做过两处改动,都**没有**移动 b=8 的数字:
 
-- 属性改到 `CloneFunctionInto` 之后设置，修复 `compiler2026.skip` 一直被丢弃的问题。
-- 两条路径都 outline，`block_cholesky` 变成纯 dispatch，串行路径成为签名和入口状态都与
-  pristine 相同的独立函数。代价是每次 `block_cholesky` 调用多一次 call（每用例一次）。
+- 属性改到 `CloneFunctionInto` 之后设置（修复 `compiler2026.skip` 一直被静默丢弃)。
+- 两条路径都 outline,`block_cholesky` 只剩 dispatch。
 
-全量验证（150 用例，40 核，PASSES=3，150/150 PASS，IR 断言
-`submit_deps=2, wait_calls=1, trsm_calls=2, madd_calls=2` 不变）：
+全量验证(150 用例,40 核,PASSES=3,150/150 PASS,IR 断言不变):geomean 3.131x 对
+3.123x,**+0.26%,落在噪声内,即中性**。
 
-| | geomean | 总分 |
-| --- | ---: | ---: |
-| Round 8 默认 | 3.123x | 45.86 |
-| 本轮（属性修复 + 双路 outline） | **3.131x** | 45.87 |
+**结论:回退,不保留。** 理由是本轮根本没有找到缺陷——b=8 的回退是布局噪声,
+不存在需要修的东西,那就不应该有代码改动。中性改动进提交包只有净风险:
 
-+0.26%，落在噪声内，视为**中性**：接受它是为了结构和 bug 修复，不声称性能收益。
-证据：`docs/benchmark_results/r9_dispatch_outline.csv`。
+- 判题机是 aarch64 + 毕昇,`noinline` 和代码体积在那边的响应未测。
+- 每次 `block_cholesky` 调用多一次 call,以及两份循环体带来的体积增长,都没有收益来抵。
+- `compiler2026.skip` 那个 bug 目前是潜在的、无害的:clone 名为
+  `compiler2026_serial_impl`/`compiler2026_async_impl`,本来就不匹配 `isBlockCholesky` 的
+  `name.find("block_cholesky")`,所以属性丢失当前不改变行为。
+
+回退后重新验证:构建通过,`SPEC_START=97 SPEC_END=100` smoke 串行/contestant 各 4/4 PASS。
+`submission/` 相对 Round 8 (`3e2d488`) 零改动。
+
+本轮留下的产出因此全部是**度量设施和结论**(`scripts/`、`tools/`、`docs/`),
+不含任何提交包代码改动。属性丢失那个 bug 记录在此,等真正需要 pass 幂等性时再修。
 
 ### 经验
 
@@ -1905,6 +1911,10 @@ geomean **0.9916x**，其中 `b<12` 桶 **0.93x**（`docs/benchmark_results/r9_a
   这类静默丢失不会报错，只能靠 dump IR 发现——第一次改完没看 IR，白测了一轮。
 - **在做"代码变差了"的归因之前，先量代码布局的噪声。** 本机 b=8 的布局噪声就有 ±10%，
   和被归因给 Pass 的量同级。padding 变体是个便宜的判别实验。
+- **实测中性的改动不进提交包。** 本轮两处 Pass 改动是顺着一个后来被否证的假设做的；
+  假设被否证之后，改动就失去了理由，哪怕它顺手修了一个潜在 bug。判题机是 aarch64 + 毕昇，
+  任何未在那里验证过的改动都只贡献风险。**先确认存在缺陷，再改代码；否则本轮的产出
+  就该只有度量设施和结论。**
 - **变体必须交错测量。** 第一版探针按变体分组跑（先全部 pristine，再全部 roundtrip），
   按构造应为 1.00 的 `rt/pristine` 两次分别给出 1.0014x 和 1.0208x——那 2% 是机器漂移，
   分组会让漂移伪装成变体效应。改成每一遍内交错三个变体后噪声底降到 0.4%。

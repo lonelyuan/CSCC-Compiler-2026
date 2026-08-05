@@ -315,89 +315,55 @@ llvm::Loop *outermostLoop(llvm::Loop *loop) {
     return loop;
 }
 
-// Clone `function`'s body into a fresh internal function named `name`.
-//
-// The two attributes must be set AFTER CloneFunctionInto: it copies the source
-// function's attribute list onto the destination, so anything added before the
-// clone is silently dropped. "compiler2026.skip" was being lost exactly this way,
-// which left the async clone unmarked for isBlockCholesky().
-//
-// noinline is what keeps the two paths from being merged back together by the
-// -O2 run that follows this pass. Each clone is called from exactly one place, so
-// the inliner would otherwise pull both bodies into the dispatcher and hand the
-// register allocator one function containing the serial loop nest and the async
-// submit machinery at once.
-llvm::Function *cloneImplementation(llvm::Function &function, const char *name) {
+llvm::Function *cloneForAsync(llvm::Function &function) {
     llvm::Module *module = function.getParent();
-    llvm::Function *clone = llvm::Function::Create(
-        function.getFunctionType(), llvm::GlobalValue::InternalLinkage, name, module);
-    clone->copyAttributesFrom(&function);
+    llvm::Function *async_fn = llvm::Function::Create(
+        function.getFunctionType(), llvm::GlobalValue::InternalLinkage,
+        "compiler2026_async_impl", module);
+    async_fn->copyAttributesFrom(&function);
+    async_fn->addFnAttr("compiler2026.skip");
 
     llvm::ValueToValueMapTy value_map;
-    auto dest_arg = clone->arg_begin();
+    auto dest_arg = async_fn->arg_begin();
     for (const llvm::Argument &source_arg : function.args()) {
         dest_arg->setName(source_arg.getName());
         value_map[&source_arg] = &*dest_arg++;
     }
 
     llvm::SmallVector<llvm::ReturnInst *, 4> returns;
-    llvm::CloneFunctionInto(clone, &function, value_map,
+    llvm::CloneFunctionInto(async_fn, &function, value_map,
                             llvm::CloneFunctionChangeType::LocalChangesOnly, returns);
-
-    clone->addFnAttr("compiler2026.skip");
-    clone->addFnAttr(llvm::Attribute::NoInline);
-    clone->setDSOLocal(true);
-    return clone;
+    async_fn->setDSOLocal(true);
+    return async_fn;
 }
 
-// Turn `function` into nothing but a runtime branch between the two clones.
-//
-// The earlier version kept the serial body in `function` and split its entry
-// block to graft the dispatch on top. That left the serial path sharing a
-// function -- and therefore a register allocation -- with the dispatch, and it
-// measurably cost the cases that never take the async path: 17 b=8 cases ran at
-// 0.907x against a build with no pass, while an otherwise identical .bc round
-// trip measured 1.00x and the two bodies' instruction sequences differed only by
-// register assignment. b=8 is where it shows because a b=8 madd is ~1024 flops
-// against a 275-byte operator called ~n^3/6b^3 times, so caller-side overhead is
-// the largest share of the run there; b=9 and b=10 showed no penalty at all.
-//
-// Outlining both sides costs one extra call per block_cholesky invocation -- once
-// per case -- and makes the serial path a standalone function with the same
-// signature and entry state as the pristine one.
-void buildDispatchBody(llvm::Function &function, llvm::Function *serial_fn,
-                       llvm::Function *async_fn, llvm::FunctionCallee should_async) {
+void insertAsyncDispatch(llvm::Function &function, llvm::Function *async_fn,
+                         llvm::FunctionCallee should_async, llvm::Value *n, llvm::Value *b) {
     llvm::LLVMContext &context = function.getContext();
-    const llvm::GlobalValue::LinkageTypes linkage = function.getLinkage();
-    function.deleteBody();
-    function.setLinkage(linkage);
+    llvm::BasicBlock &entry = function.getEntryBlock();
+    llvm::Instruction *split_point = &*entry.getFirstInsertionPt();
+    llvm::BasicBlock *serial_block = entry.splitBasicBlock(split_point, "compiler2026.serial");
 
-    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", &function);
+    llvm::Instruction *old_branch = entry.getTerminator();
+    old_branch->eraseFromParent();
+
     llvm::BasicBlock *async_block =
-        llvm::BasicBlock::Create(context, "compiler2026.async", &function);
-    llvm::BasicBlock *serial_block =
-        llvm::BasicBlock::Create(context, "compiler2026.serial", &function);
+        llvm::BasicBlock::Create(context, "compiler2026.async", &function, serial_block);
 
+    llvm::IRBuilder<> entry_builder(&entry);
+    llvm::Value *decision = entry_builder.CreateCall(should_async, {n, b});
+    llvm::Value *use_async =
+        entry_builder.CreateICmpNE(decision, llvm::ConstantInt::get(decision->getType(), 0));
+    entry_builder.CreateCondBr(use_async, async_block, serial_block);
+
+    llvm::IRBuilder<> async_builder(async_block);
     std::vector<llvm::Value *> args;
     args.reserve(function.arg_size());
     for (llvm::Argument &arg : function.args()) {
         args.push_back(&arg);
     }
-    llvm::Value *n = args[2];
-    llvm::Value *b = args[3];
-
-    llvm::IRBuilder<> entry_builder(entry);
-    llvm::Value *decision = entry_builder.CreateCall(should_async, {n, b});
-    entry_builder.CreateCondBr(
-        entry_builder.CreateICmpNE(decision,
-                                   llvm::ConstantInt::get(decision->getType(), 0)),
-        async_block, serial_block);
-
-    llvm::IRBuilder<> async_builder(async_block);
-    async_builder.CreateRet(async_builder.CreateCall(async_fn, args));
-
-    llvm::IRBuilder<> serial_builder(serial_block);
-    serial_builder.CreateRet(serial_builder.CreateCall(serial_fn, args));
+    llvm::CallInst *result = async_builder.CreateCall(async_fn, args);
+    async_builder.CreateRet(result);
 }
 
 void replaceOperatorCallWithTaskSubmit(llvm::CallBase *call, RuntimeApi &runtime,
@@ -823,17 +789,17 @@ public:
         RuntimeApi runtime = getRuntimeApi(*module);
         TaskIr task_ir = getTaskIr(*module);
 
+        auto arg = function.arg_begin();
+        (void)&*arg++;
+        (void)&*arg++;
+        llvm::Value *n = &*arg++;
+        llvm::Value *b = &*arg++;
+
         const bool has_tile_dag_annotation =
             hasFunctionAnnotation(function, kTileDagAnnotation);
-        // Clone the serial side before the async side is transformed, so it keeps
-        // the pristine body, and clone it at all so that block_cholesky itself can
-        // be reduced to the dispatch alone.
-        llvm::Function *serial_fn =
-            cloneImplementation(function, "compiler2026_serial_impl");
-        llvm::Function *async_fn =
-            cloneImplementation(function, "compiler2026_async_impl");
+        llvm::Function *async_fn = cloneForAsync(function);
         transformAsyncFunction(*async_fn, runtime, task_ir, has_tile_dag_annotation);
-        buildDispatchBody(function, serial_fn, async_fn, runtime.should_async);
+        insertAsyncDispatch(function, async_fn, runtime.should_async, n, b);
 
         return llvm::PreservedAnalyses::none();
     }
