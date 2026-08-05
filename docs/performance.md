@@ -1,31 +1,79 @@
 # 性能记录
 
-本文件记录当前正式 IR-level Pass 的性能。所有数据来自 openEuler aarch64 VM，使用毕昇 3.2.0.1 / LLVM 15.0.4，`COMPILER2026_DAG_THREADS=4`，每组重复 3 次。
+本文件记录当前 IR-level Pass + runtime 的性能。当前有效数据来自 40 物理核 x86_64 调试机,
+按判题的**等权重 per-case 几何平均**口径测量;早期 4 vCPU aarch64 VM 的 suite 总时间比数据
+口径不同,仅存档在文末。
+
+## 计量口径（重要）
+
+判题用的是**等权重 per-case 几何平均**,不是各 suite 的总时间比:
+
+```text
+speedup_i   = T0_i / T_i
+geo_speedup = (prod speedup_i) ** (1 / N)
+score       = 0.4 * functional + 0.6 * (100 * geo_speedup / m_ideal)
+```
+
+总时间比是 flops 加权的,被最大的用例支配;等权重下 `n=128` 和 `n=2048` 权重完全相同。
+同一份数据两者差别很大(150 用例:等权重 4.31x,总时间比 6.38x)。因此性能结论一律以
+`scripts/percase_bench.sh` + `scripts/score_judge.py` 的 per-case 口径为准。
+`submission/scripts/benchmark.sh` 的 suite 总时间比只适合看大用例的相对变化。
 
 ## 当前有效结果
 
-当前交付版本是 `live_window_default_repeat3_final`：
+平台:40 物理核 / 80 逻辑核 x86_64 调试机(Xeon Gold 5218R ×2,Ubuntu 22.04,LLVM 17),
+`taskset -c 0-39` 绑定物理核。**这不是官方性能平台**;鲲鹏 920 上必须重测。
+
+方法:官方 150 个公开用例(`cases/preliminary_public_150.txt`),整进程跑 3 遍、
+每用例取 3 遍中的最小值(`PASSES=3 REPEAT=1`)。`REPEAT=1` 是忠实配置——判题一个进程跑完
+150 个用例,任何 per-case 首次调用开销都必须计入。串行参考与 contestant 使用同一 harness、
+同一输入,两侧输出全部过 verifier;任何用例非 PASS 直接判失败。
+
+| 轮次 | 主要改动 | per-case geomean | 总分(m_ideal=32) | 最差用例 |
+| --- | --- | ---: | ---: | ---: |
+| Round 8 | tile DAG + participant cap | 3.123x | 45.86 | 0.252x |
+| Round 11 | 相位屏障 + 提交暂存随参与者缩放 + 池只增不减 | 3.643x | 46.83 | 0.107x |
+| Round 13 | range task + 阈值降到 8 + 加载时预热 | 4.308x | 48.08 | 0.914x |
+| Round 14 | range task 预算 200000 → 50000 flops | 见下 | | |
+
+150/150 verifier PASS,IR 断言
+`ir_submits=1 (plain=1 deps=0) ir_wait_calls=2 ir_trsm_calls=2 ir_madd_calls=3`。
+
+按 block size 分桶(Round 13,等权重下用例**数量**才是权重):
+
+| 桶 | 用例数 | geomean |
+| --- | ---: | ---: |
+| `b < 12` | 22 | 1.95x |
+| `12 <= b < 32` | 39 | 3.9x |
+| `32 <= b < 128` | 61 | 6.4x |
+| `b >= 128` | 28 | 3.7x |
+
+单点最高:`n=2048 b=64` 18.03x,`n=1792 b=32` 15.40x,`n=1152 b=64` 14.35x。
+
+证据 CSV:
 
 ```text
-docs/benchmark_results/live_window_default_repeat3_final.csv
+docs/benchmark_results/r9_percase_baseline.csv     Round 8 起点
+docs/benchmark_results/r11_pool_gating.csv         Round 11
+docs/benchmark_results/r13_warmup.csv              Round 13
+docs/benchmark_results/r11_participant_sweep.csv   参与者数扫参(201 点)
+docs/benchmark_results/r13_range_task_sweep.csv    range task 扫参
+docs/benchmark_results/r9_layout_sensitivity.csv   代码布局噪声
 ```
 
-VM 原始输出：
+## 测量噪声（解读上表时必须知道）
 
-```text
-/root/bisheng/build/optimization_benchmarks/live_window_default_repeat3_final.csv
-```
+- **运行间噪声**:同一份配置连跑两遍全量,geomean 分别为 4.017x 和 4.247x,差 **5.7%**。
+  因此上表中 3% 以内的差异没有分辨力,小改动必须用配对逐用例对照(把用例分成"该改动可能
+  影响的"和"不可能影响的"两组)来判断。
+- **构建间噪声**:`b=8` 用例带约 ±10% 的代码布局分量。同一个**不加 pass** 的程序,
+  只改链接 padding 字节数,17 个 `b=8` 用例的 geomean 就在 0.90x–1.00x 之间摆动
+  (`r9_layout_sensitivity.csv`)。任何 `b=8` 结论都不能来自单次构建。
 
-结果摘要：
+## 历史结果（4 vCPU VM，口径不同，仅作存档）
 
-| Suite | serial avg | contestant avg | speedup |
-| --- | ---: | ---: | ---: |
-| `n512_576` | 0.089092s | 0.064921s | 1.372x |
-| `n768` | 0.230897s | 0.119694s | 1.929x |
-| `n1024` | 0.309757s | 0.164806s | 1.880x |
-| `n1152_small_b` | 0.364400s | 0.240526s | 1.515x |
-
-四个 suite / 3 次重复的 speedup 几何平均约为 `1.657x`，总耗时 speedup 约为 `1.685x`，`contestant_total=1.769841s`。所有 contestant 输出均通过 verifier。该结果是当前 IR-level、官方 ABI 保留、panel-local ready queue DAG 路线下的有效性能记录；早期整函数替换路线的更高结果不作为当前提交方案。
+早期在 openEuler aarch64 4 vCPU VM 上用 suite 总时间比记录的结果(约 1.657x)与上表口径
+不同,且平台差异过大,不作为当前性能记录。
 
 ## 2026-07-17 annotation 关键路径实验（非正式本机结果）
 

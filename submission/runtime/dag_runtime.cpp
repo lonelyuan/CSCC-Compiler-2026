@@ -402,7 +402,16 @@ public:
     }
 
     std::size_t rangeChunkLength(std::size_t count) const {
-        std::size_t target_flops = 200000;
+    // 50000 flops per task, i.e. about 5us of work at this host's madd throughput.
+    // Swept 6000/12500/25000/50000/100000/200000/400000/800000 at 16/24/40
+    // participants, 3 repeats per point, on n=1152 with b from 8 to 128. At the
+    // default 24 participants 50000 beat 200000 on b=8 (3.94x vs 3.63x), b=12
+    // (6.12x vs 5.96x), b=16 (7.80x vs 7.52x), b=24 (9.84x vs 9.07x) and b=32
+    // (11.46x vs 11.09x), tied at b=64 and lost slightly at b=128 (7.65x vs
+    // 7.95x). Going below 50000 turns over: at 6000 the small tiles collapse
+    // (b=8 3.35x, b=12 4.30x) because the chunk stops covering the queue round
+    // trip it costs.
+        std::size_t target_flops = 50000;
         if (const char *env = std::getenv("COMPILER2026_RANGE_TASK_FLOPS")) {
             char *end = nullptr;
             const unsigned long configured = std::strtoul(env, &end, 10);
