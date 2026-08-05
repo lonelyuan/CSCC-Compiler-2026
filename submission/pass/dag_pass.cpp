@@ -109,6 +109,11 @@ bool criticalPriorityEnabledFromEnv() {
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
+bool trsmRangeEnabledFromEnv() {
+    const char *env = std::getenv("COMPILER2026_TRSM_RANGE");
+    return env == nullptr || (env[0] != '\0' && env[0] != '0');
+}
+
 bool hasFunctionAnnotation(llvm::Function &function, llvm::StringRef annotation) {
     llvm::GlobalVariable *annotations =
         function.getParent()->getGlobalVariable("llvm.global.annotations");
@@ -720,6 +725,148 @@ llvm::Function *getMaddRangeTask(llvm::Module &module, llvm::StructType *range_c
     return task_fn;
 }
 
+llvm::StructType *getTrsmRangeContext(llvm::Module &module) {
+    llvm::LLVMContext &context = module.getContext();
+    if (llvm::StructType *existing = llvm::StructType::getTypeByName(
+            context, "compiler2026.trsm_range_context")) {
+        return existing;
+    }
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::StructType *ty =
+        llvm::StructType::create(context, "compiler2026.trsm_range_context");
+    ty->setBody({ptr_ty, int32_ty, int32_ty, int32_ty});
+    return ty;
+}
+
+// One logical index is one trailing block row in the current panel. This keeps
+// every official trsm call visible while removing one context allocation and
+// submit sequence per row from the single submitting thread.
+llvm::Function *getTrsmRangeTask(llvm::Module &module,
+                                llvm::StructType *range_ctx_ty) {
+    if (llvm::Function *existing =
+            module.getFunction("compiler2026_task_trsm_range")) {
+        return existing;
+    }
+
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::Type *int64_ty = llvm::Type::getInt64Ty(context);
+    llvm::FunctionType *task_ty = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context), {ptr_ty, int32_ty, int32_ty}, false);
+    llvm::Function *task_fn = llvm::Function::Create(
+        task_ty, llvm::GlobalValue::InternalLinkage,
+        "compiler2026_task_trsm_range", module);
+    task_fn->addFnAttr("compiler2026.skip");
+
+    llvm::FunctionType *operator_ty = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context),
+        {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+    llvm::FunctionCallee trsm_fn = module.getOrInsertFunction("trsm", operator_ty);
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", task_fn);
+    llvm::BasicBlock *loop = llvm::BasicBlock::Create(context, "loop", task_fn);
+    llvm::BasicBlock *exit = llvm::BasicBlock::Create(context, "exit", task_fn);
+    llvm::Argument *ctx_arg = task_fn->getArg(0);
+    llvm::Argument *begin_arg = task_fn->getArg(1);
+    llvm::Argument *end_arg = task_fn->getArg(2);
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *matrix =
+        builder.CreateLoad(ptr_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 0));
+    llvm::Value *panel =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 1));
+    llvm::Value *lda =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 2));
+    llvm::Value *tile =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 3));
+    llvm::Value *wide_lda = builder.CreateSExt(lda, int64_ty);
+    llvm::Value *wide_panel = builder.CreateSExt(panel, int64_ty);
+    llvm::Value *diag_offset = builder.CreateAdd(
+        builder.CreateMul(wide_panel, wide_lda), wide_panel);
+    llvm::Value *diag =
+        builder.CreateInBoundsGEP(builder.getDoubleTy(), matrix, diag_offset);
+    builder.CreateCondBr(builder.CreateICmpSLT(begin_arg, end_arg), loop, exit);
+
+    builder.SetInsertPoint(loop);
+    llvm::PHINode *index = builder.CreatePHI(int32_ty, 2, "trsm.index");
+    index->addIncoming(begin_arg, entry);
+    llvm::Value *row = builder.CreateAdd(
+        builder.CreateAdd(panel, tile), builder.CreateMul(index, tile));
+    llvm::Value *row_offset = builder.CreateAdd(
+        builder.CreateMul(builder.CreateSExt(row, int64_ty), wide_lda),
+        wide_panel);
+    llvm::Value *block =
+        builder.CreateInBoundsGEP(builder.getDoubleTy(), matrix, row_offset);
+    builder.CreateCall(trsm_fn, {block, diag, block, tile, lda});
+    llvm::Value *next = builder.CreateAdd(index, builder.getInt32(1));
+    index->addIncoming(next, loop);
+    builder.CreateCondBr(builder.CreateICmpSLT(next, end_arg), loop, exit);
+
+    builder.SetInsertPoint(exit);
+    builder.CreateRetVoid();
+    return task_fn;
+}
+
+bool replaceTrsmLoopWithRangeSubmit(
+    llvm::CallBase *call, llvm::Loop *loop, llvm::Value *matrix_l,
+    llvm::Value *n, llvm::Value *b, llvm::StructType *range_ctx_ty,
+    llvm::FunctionCallee alloc, llvm::FunctionCallee submit_range_grain,
+    llvm::Function *range_task, llvm::DominatorTree &dominator_tree,
+    llvm::LoopInfo &loop_info) {
+    if (loop == nullptr || !loop->getSubLoops().empty()) {
+        return false;
+    }
+    llvm::Value *diag = call->getArgOperand(1);
+    if (!loop->isLoopInvariant(diag)) {
+        return false;
+    }
+    llvm::BasicBlock *preheader = loop->getLoopPreheader();
+    if (preheader == nullptr) {
+        llvm::BasicBlock *predecessor = loop->getLoopPredecessor();
+        if (predecessor == nullptr) {
+            return false;
+        }
+        preheader = llvm::SplitEdge(predecessor, loop->getHeader(),
+                                    &dominator_tree, &loop_info);
+        if (preheader == nullptr) {
+            return false;
+        }
+    }
+
+    llvm::Module *module = call->getModule();
+    llvm::IRBuilder<> builder(preheader->getTerminator());
+    llvm::Type *int64_ty = builder.getInt64Ty();
+    llvm::Value *byte_offset = builder.CreateSub(
+        builder.CreatePtrToInt(diag, int64_ty),
+        builder.CreatePtrToInt(matrix_l, int64_ty));
+    llvm::Value *element_offset = builder.CreateExactSDiv(
+        byte_offset, llvm::ConstantInt::get(int64_ty, sizeof(double)));
+    llvm::Value *wide_n = builder.CreateSExt(n, int64_ty);
+    llvm::Value *panel_wide = builder.CreateSDiv(
+        element_offset, builder.CreateAdd(wide_n, builder.getInt64(1)));
+    llvm::Value *panel =
+        builder.CreateSExtOrTrunc(panel_wide, builder.getInt32Ty());
+    llvm::Value *count = builder.CreateSDiv(
+        builder.CreateSub(builder.CreateSub(n, panel), b), b);
+
+    const llvm::DataLayout &layout = module->getDataLayout();
+    llvm::Type *size_ty = llvm::IntegerType::get(
+        module->getContext(), layout.getPointerSizeInBits());
+    llvm::Value *ctx = builder.CreateCall(
+        alloc, {llvm::ConstantInt::get(
+                   size_ty, layout.getTypeAllocSize(range_ctx_ty).getFixedValue())});
+    builder.CreateStore(matrix_l, fieldPtr(builder, range_ctx_ty, ctx, 0));
+    builder.CreateStore(panel, fieldPtr(builder, range_ctx_ty, ctx, 1));
+    builder.CreateStore(n, fieldPtr(builder, range_ctx_ty, ctx, 2));
+    builder.CreateStore(b, fieldPtr(builder, range_ctx_ty, ctx, 3));
+    builder.CreateCall(submit_range_grain,
+                       {range_task, ctx, count, builder.getInt32(1)});
+    call->eraseFromParent();
+    return true;
+}
+
 // Replace the innermost madd loop with one range submit in its preheader.
 //
 // Only the madd call is erased, not the loop itself: with no side effects left the
@@ -1197,9 +1344,24 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
         // exactly this barrier still beat the dependency-tracked runtime by
         // 1.5x-9.7x on the same cases, so the overlap was worth less than the
         // bookkeeping needed to express it.
+        llvm::StructType *trsm_range_ctx_ty =
+            getTrsmRangeContext(*async_fn.getParent());
+        llvm::Function *trsm_range_task =
+            getTrsmRangeTask(*async_fn.getParent(), trsm_range_ctx_ty);
+        entry_builder.CreateCall(
+            runtime.register_task,
+            {trsm_range_task,
+             entry_builder.CreateGlobalStringPtr("trsm_range")});
         for (llvm::CallBase *call : trsm_calls) {
             llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
             addLoopExitWaits(loop, runtime.wait, wait_blocks);
+            if (has_tile_dag_annotation && trsmRangeEnabledFromEnv() &&
+                replaceTrsmLoopWithRangeSubmit(
+                    call, loop, matrix_l, n, b, trsm_range_ctx_ty,
+                    runtime.alloc, runtime.submit_range_grain,
+                    trsm_range_task, dominator_tree, loop_info)) {
+                continue;
+            }
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
         }
 

@@ -2743,3 +2743,74 @@ Round 20 分桶是 `6.61x / 9.07x / 7.98x / 3.86x`（`b<12`、`12<=b<32`、
 - 竞争环境中的异常点整轮作废；清空进程后从头重跑，不能挑看起来合理的点保留。
 - 一项结构改动有效，不等于量级足够。二维 tiling 对受影响组 +30.7%，但只覆盖 41/150，
   全量仍只有 53.14 分。
+
+## 2026-08-05 TRSM range outlining（Round 26–27）
+
+### 实现
+
+- Pass 新增 `compiler2026_task_trsm_range(ctx, begin, end)`。range 中的每个逻辑 index 对应
+  当前 panel 的一个 trailing block row，task 仍逐行直接调用官方 `@trsm`。
+- 原来每个 TRSM 行都由提交线程分配 context、写入参数并 submit；现在每个 panel 只分配一个
+  context，并调用一次通用 `compiler2026_runtime_submit_range_grain(..., grain=1)`。TRSM/MADD
+  之间和 panel 之间的 wait 均保持不变。
+- 编译期 A/B 开关为 `COMPILER2026_TRSM_RANGE=0/1`，默认开启。benchmark 的 IR 变换断言同步
+  统计 `submit_range*`，避免 scalar submit 全部消失后误报“Pass 未生效”。
+- 规则检查：优化 IR 中 `compiler2026_task_trsm_range` 直接调用官方 `@trsm`，没有修改官方算子、
+  baseline 语义或 ABI；全量日志记录 `ir_submits=2 (plain=0 range=2 deps=0)`。
+
+### 同轮配对 A/B
+
+在干净独占的远端环境分别运行以下两组；`CASES` 为
+`256/384/640/768/1152 × b=8/16/32/64`，每个点 `REPEAT=3` 且通过 verifier：
+
+```bash
+COMPILER2026_TRSM_RANGE=0 KNOB=COMPILER2026_DAG_FAST_PHASE VALUES=1 \
+  CASES="256:8 384:8 640:8 768:8 1152:8 256:16 384:16 640:16 768:16 1152:16 256:32 384:32 640:32 768:32 1152:32 256:64 384:64 640:64 768:64 1152:64" \
+  REPEAT=3 CSV_OUT=/root/bisheng/r26_trsm_range_off.csv ./scripts/knob_sweep.sh
+COMPILER2026_TRSM_RANGE=1 KNOB=COMPILER2026_DAG_FAST_PHASE VALUES=1 \
+  CASES="256:8 384:8 640:8 768:8 1152:8 256:16 384:16 640:16 768:16 1152:16 256:32 384:32 640:32 768:32 1152:32 256:64 384:64 640:64 768:64 1152:64" \
+  REPEAT=3 CSV_OUT=/root/bisheng/r26_trsm_range_on.csv ./scripts/knob_sweep.sh
+```
+
+以 `off contestant_seconds / on contestant_seconds` 做逐用例配对几何平均：
+
+| 分组 | 用例数 | TRSM range 加速 |
+| --- | ---: | ---: |
+| 全部 | 20 | **1.0544x** |
+| `b<12` | 5 | **1.1400x** |
+| `12<=b<32` | 5 | **1.0800x** |
+| `b>=32`（机制控制组） | 10 | **1.0019x** |
+
+证据：`r26_trsm_range_off.csv`、`r26_trsm_range_on.csv` 和
+`r26_trsm_range_ab_clean.log`。控制组几乎不动，而收益集中在每 panel 行数多、单 task 很短的
+小 tile，确认收益来自减少提交线程固定工作，不是整机漂移。
+
+### 五段全量验证
+
+```bash
+COMPILER2026_TRSM_RANGE=1 LABEL=r27_cg_trsm_range PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+```
+
+五段退出码为 0，serial 和 contestant 均 **150/150 verifier PASS**。合并结果：
+
+| 版本 | geomean | 总分 |
+| --- | ---: | ---: |
+| Round 20 二维 MADD tiling | 7.005795x | 53.14 |
+| **Round 27 + TRSM range** | **7.385822x** | **53.85** |
+
+Round 27 分桶为 `7.833x / 9.740x / 8.126x / 3.896x`（`b<12`、`12<=b<32`、
+`32<=b<128`、`b>=128`）。相对 Round 20 的 contestant time 全量逐例配对是 **1.0482x**；
+分桶依次为 `1.1708x / 1.0672x / 1.0157x / 1.0040x`，与同轮 A/B 的机制方向一致。
+
+证据：`r27_cg_trsm_range.csv`、`r27_cg_trsm_range_c1.csv`–`c5.csv` 和
+`r27_trsm_range_full_clean.log`。
+
+### 经验
+
+- 对小 tile，编译器生成的逐迭代 context/submit 序列本身就是可量化的固定延迟；range outlining
+  能在不改变算子和屏障语义的前提下消除它。
+- 必须保留按机制分组的同轮 A/B。跨轮全量提高 5.4%，本来接近历史噪声；`b>=32` 控制组
+  1.0019x 和小 tile 两个受影响组的同向收益，才使结论可靠。
+- 该改动把总分提高约 0.71 分，但距离 60 分所需 10.667x 仍差 **1.444x**；不能把减少 TRSM
+  提交成本误判为已经解决所有 per-panel 固定延迟。
