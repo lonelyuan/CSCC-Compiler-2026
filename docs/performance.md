@@ -20,7 +20,39 @@ score       = 0.4 * functional + 0.6 * (100 * geo_speedup / m_ideal)
 `scripts/percase_bench.sh` + `scripts/score_judge.py` 的 per-case 口径为准。
 `submission/scripts/benchmark.sh` 的 suite 总时间比只适合看大用例的相对变化。
 
-## 当前有效结果（aarch64，最接近官方平台）
+## 当前 main/HEAD 有效结果（Round 28，优先于下文历史）
+
+当前主线在同一 40 核 AArch64 / openEuler / BiSheng 平台上重新完成五段全量校准：
+
+```bash
+LABEL=r28_head5394c43_cg_baseline PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+```
+
+150/150 verifier PASS；优化后 IR 为
+`ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4`。
+
+| 版本 | per-case geomean | 总时间比 | 总分（m_ideal=32） |
+| --- | ---: | ---: | ---: |
+| Round 15：AArch64 粒度重标定 | 4.369577x | 7.782028x | 48.19 |
+| Round 17：持久无锁 phase | 6.123237x | 9.616969x | 51.48 |
+| Round 20：二维 MADD tiling | 7.005795x | 11.257326x | 53.14 |
+| Round 27：TRSM range outlining | 7.385822x | 11.750535x | 53.85 |
+| **Round 28：当前 HEAD 校准** | **7.386502x** | **11.660466x** | **53.85** |
+
+当前分桶为 `7.755x / 9.748x / 8.176x / 3.872x`（`b<12`、`12<=b<32`、
+`32<=b<128`、`b>=128`）。证据为
+`r28_head5394c43_cg_baseline.csv`、`r28_head5394c43_cg_baseline_c1.csv`–`c5.csv`
+和 `r28_head5394c43_baseline.log`。被测源码为干净的 `5394c43`；后续 `9013c03` 只归档
+本轮 CSV、日志和文档，`submission/`、`scripts/` 没有变化，因此 7.386502x / 53.85 是当前
+代码基线，不是借用历史分支成绩。
+
+Round 17–27 的三项主改动分别解决无依赖 phase 的共享队列交接、MADD 二维复用和逐行 TRSM
+固定提交延迟。当前下一步不再优先替换 barrier/work stealing，而应减少小 tile 的必需内存流量，
+并继续压缩覆盖 `12<=b<128` 的每 panel 固定工作。到 60 分需要 geomean 10.667x，仍需全量
+1.444x。
+
+## 历史基线：Round 15（保留用于解释平台粒度重标定）
 
 平台:HiSilicon aarch64 40 核 / 单 NUMA / 2.9 GHz 定频(boost disabled)/ L3 32 MiB,
 openEuler 22.03 LTS,BiSheng Enterprise 3.2.0.1.B004 clang 15.0.4。

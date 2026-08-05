@@ -1,0 +1,937 @@
+% !TeX program = xelatex
+% 编译：在 docs 目录执行 `make`，或：
+% latexmk -xelatex -interaction=nonstopmode -halt-on-error \
+%   -outdir=../build/docs technical_report.tex
+\documentclass[UTF8,a4paper,openany,11pt,fontset=fandol]{ctexrep}
+
+\usepackage[margin=2.45cm,headheight=15pt]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,tabularx,array,multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage[most]{tcolorbox}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{xurl}
+\usepackage{hyperref}
+
+\definecolor{Primary}{HTML}{173B57}
+\definecolor{Secondary}{HTML}{227C9D}
+\definecolor{Accent}{HTML}{E07A5F}
+\definecolor{Good}{HTML}{2A9D8F}
+\definecolor{Warn}{HTML}{E9C46A}
+\definecolor{Light}{HTML}{F3F6F8}
+\definecolor{CodeBg}{HTML}{F7F8FA}
+\definecolor{CodeFrame}{HTML}{D8DEE4}
+\definecolor{Muted}{HTML}{5B6573}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=Primary,
+  citecolor=Secondary,
+  urlcolor=Secondary,
+  pdftitle={动态算子图编译与并行调度技术报告},
+  pdfsubject={全国大学生计算机系统能力大赛编译系统挑战赛项目文档}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\color{Muted}\small 动态算子图编译与并行调度}
+\fancyhead[R]{\color{Muted}\small 技术报告}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\setlength{\emergencystretch}{2em}
+\setlist{nosep,leftmargin=2.2em}
+\renewcommand{\arraystretch}{1.25}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{CodeBg},
+  frame=single,
+  rulecolor=\color{CodeFrame},
+  columns=fullflexible,
+  breaklines=true,
+  keepspaces=true,
+  showstringspaces=false,
+  keywordstyle=\color{Primary}\bfseries,
+  commentstyle=\color{Good},
+  stringstyle=\color{Accent},
+  aboveskip=0.8em,
+  belowskip=0.8em
+}
+
+\newtcolorbox{summarybox}[1][]{
+  enhanced,breakable,colback=Light,colframe=Secondary,
+  boxrule=0.7pt,arc=2pt,left=7pt,right=7pt,top=6pt,bottom=6pt,#1
+}
+\newtcolorbox{warningbox}[1][]{
+  enhanced,breakable,colback=Warn!14,colframe=Accent,
+  boxrule=0.7pt,arc=2pt,left=7pt,right=7pt,top=6pt,bottom=6pt,#1
+}
+
+\ctexset{
+  chapter={
+    format=\Huge\bfseries\color{Primary},
+    name={第,章},
+    number=\arabic{chapter},
+    beforeskip=0pt,
+    afterskip=24pt
+  },
+  section={format=\Large\bfseries\color{Primary}},
+  subsection={format=\large\bfseries\color{Secondary}}
+}
+
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+  \pagecolor{Primary}
+  \color{white}
+  \vspace*{2.0cm}
+  {\Large 2026 年编译系统挑战赛项目文档\par}
+  \vspace{1.2cm}
+  {\fontsize{34}{44}\selectfont\bfseries
+    动态算子图编译\par
+    与并行调度\par}
+  \vspace{0.8cm}
+  {\LARGE 功能、性能、创新性与测试分析报告\par}
+  \vfill
+  \begin{tikzpicture}
+    \draw[white!60,line width=1.2pt] (0,0) -- (13,0);
+    \foreach \x in {0.8,3.1,5.4,7.7,10.0,12.3}{
+      \fill[Secondary!80] (\x,0) circle (3pt);
+    }
+    \draw[white!35,line width=0.7pt]
+      (0.8,0) to[bend left=20] (3.1,0)
+      (3.1,0) to[bend right=18] (5.4,0)
+      (5.4,0) to[bend left=22] (7.7,0)
+      (7.7,0) to[bend right=16] (10.0,0)
+      (10.0,0) to[bend left=20] (12.3,0);
+  \end{tikzpicture}
+  \vfill
+  {\large 文档数据冻结：2026 年 8 月 5 日\par}
+  {\large 对应仓库版本：\texttt{7e07d6a}\par}
+  \vspace{0.8cm}
+\end{titlepage}
+\nopagecolor
+\color{black}
+
+\hypersetup{pageanchor=true}
+\pagenumbering{Roman}
+\chapter*{摘要}
+\addcontentsline{toc}{chapter}{摘要}
+
+本项目面向“动态算子图编译与并行调度”赛题，
+通过 LLVM Pass 从优化后的 IR 中识别算子与循环结构，生成异步版本，
+并插入通用运行时接口。当前默认路径采用同步 \texttt{cholesky}、TRSM range、阶段同步、
+二维分组 MADD range、阶段同步的调度方式；对无依赖 phase 使用持久 epoch session 与静态领取，
+避免细粒度任务反复经过共享队列。
+
+项目的主要工程创新包括：以版本化函数 annotation 为 IR 语义契约，在地址表达被
+GEP/PHI 折叠后恢复块坐标；以一维与二维 range task 在编译器与通用运行时之间传递迭代空间；
+以测量证据选择“两阶段屏障”与持久无锁 phase，而非维护成本更高的逐任务依赖图；
+以及贯通正确性验证、优化后 IR 断言、运行时 profile 与逐用例评分的数据闭环。
+
+最接近官方平台的有效结果来自 40 核 HiSilicon AArch64、openEuler 22.03、
+ BiSheng/Clang 15.0.4。
+
+% \begin{summarybox}[title=结论先行]
+% 当前方案已经形成“编译期识别与改写---通用运行时执行---verifier 与 CSV 复核”的完整链路。
+% 已验证的优势是中小块上的缓存复用、低开销 phase 执行和竞赛合规性；主要剩余空间不在大块
+% 或跨 panel 调度，而在小 tile 的必需内存流量、中等 tile 的执行效率和每 panel 固定延迟。
+% \end{summarybox}
+
+\vspace{0.5em}
+\noindent\textbf{关键词：}LLVM Pass；任务图；分块 Cholesky；并行运行时；任务粒度；AArch64
+
+\tableofcontents
+\listoffigures
+\listoftables
+\clearpage
+\pagenumbering{arabic}
+
+\chapter{项目背景与目标}
+
+\section{赛题任务}
+
+赛题要求参赛者在 BiSheng/LLVM 编译链中增加优化 Pass，分析动态算子图中的依赖，生成
+可执行程序并在保证数值正确的前提下提高并行性能。目标程序是分块 Cholesky 分解，输入为
+双精度对称正定矩阵；矩阵规模 \(n\) 与块大小 \(b\) 在运行时给定。核心算子为：
+
+\begin{itemize}
+  \item \texttt{cholesky}：分解当前对角块；
+  \item \texttt{trsm}：利用已分解的对角块更新 panel 中的块；
+  \item \texttt{madd}：更新 trailing matrix 中的输出块。
+\end{itemize}
+
+若将块坐标记为 \((r,c)\)，第 \(p\) 个 panel 的核心依赖为
+
+\begin{align*}
+  C(p,p) &\rightarrow T(r,p),\\
+  T(r,p),T(c,p) &\rightarrow M(r,c,p),\\
+  M(p+1,p+1,p) &\rightarrow C(p+1,p+1).
+\end{align*}
+
+其中同一阶段内的大量 \texttt{trsm} 或 \texttt{madd} 互相独立，构成主要并行来源。
+
+\section{设计目标与边界}
+
+\begin{table}[H]
+  \centering
+  \caption{项目目标与竞赛边界}
+  \begin{tabularx}{\textwidth}{L{3.0cm}Y Y}
+    \toprule
+    维度 & 项目目标 & 明确边界 \\
+    \midrule
+    功能 & 从 IR 识别算子、构建并行执行路径、输出正确矩阵 & 不修改输入输出格式与 verifier \\
+    编译器 & 保留原函数并生成异步版本，自动插入 runtime 调用 & 不把整个算法替换为手写并行 Cholesky \\
+    算子 & 任务函数直接调用官方 ABI & 不修改、重定义或绕过官方算子 \\
+    运行时 & 提供线程池、队列、range task、依赖实验和 profile & 不包含针对某个测试规模的预计算结果 \\
+    性能 & 按逐用例几何平均评价，兼顾小、中、大块 & 不以 I/O、校验器或计时漏洞制造加速 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{提交物组成}
+
+提交工程由三部分组成：\path{submission/pass/dag_pass.cpp} 实现编译期识别与改写；
+\path{submission/runtime/dag_runtime.cpp} 实现通用并行执行；
+\path{submission/manifest.json} 声明 Pass 插件、运行时静态库和链接参数。
+构建产物为 \texttt{libcontestant\_pass.so} 与
+\texttt{libcontestant\_runtime.a}，由评测机在目标架构上重新编译，提交包不携带本机二进制。
+
+\chapter{功能与系统设计}
+
+\section{总体流程}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance=7mm and 4mm,
+    box/.style={draw=Primary,rounded corners=2pt,fill=Light,minimum height=11mm,
+                text width=2.35cm,align=center,font=\small},
+    arr/.style={-{Latex[length=2.3mm]},thick,color=Secondary}
+  ]
+    \node[box] (src) {官方 baseline\\+ 合法函数 annotation};
+    \node[box,right=of src] (ir) {Clang \texttt{-O2}\\生成 LLVM IR};
+    \node[box,right=of ir] (pass) {\texttt{contestant-}\\\texttt{pass}\\识别、克隆、outline};
+    \node[box,right=of pass] (link) {优化后 IR\\链接官方算子与 runtime};
+    \node[box,below=10mm of pass] (rt) {通用运行时\\线程池、range、队列、profile};
+    \node[box,right=of link] (exe) {参赛可执行程序\\串行/并行运行时分派};
+    \draw[arr] (src) -- (ir);
+    \draw[arr] (ir) -- (pass);
+    \draw[arr] (pass) -- (link);
+    \draw[arr] (rt) -- (link);
+    \draw[arr] (link) -- (exe);
+  \end{tikzpicture}
+  \caption{编译与执行链路}
+\end{figure}
+
+\section{LLVM Pass 功能}
+
+Pass 是 LLVM New Pass Manager 的 \texttt{FunctionPass}，只处理签名匹配的
+\texttt{block\_cholesky}。核心步骤如下。
+
+\subsection{IR 版本化与运行时分派}
+
+Pass 保留原始函数作为串行路径，克隆出 \path{compiler2026_async_impl}，并在入口插入
+\path{compiler2026_runtime_should_async(n,b)}。这样，小规模或单块用例不会无条件承担
+线程池和同步开销；较大用例进入并行路径。运行时默认异步块阈值为 \(b\ge 8\)，最小块数为 2，
+同时结合 \(n\)、硬件线程数和 participant cap 选择实际参与者。
+
+\subsection{算子 outline 与 ABI 保留}
+
+Pass 为算子生成任务 context 和内部任务函数。任务函数加载参数后直接执行
+\texttt{@trsm} 或 \texttt{@madd}，原始 call site 则替换为运行时 submit。该设计保证：
+
+\begin{itemize}
+  \item 官方算子实现仍是唯一数值计算实现；
+  \item 运行时只认识函数指针、context、range 和可选整数依赖 key；
+  \item 优化逻辑集中在 IR 变换与调度，不污染算法源码和官方 ABI。
+\end{itemize}
+
+\subsection{版本化语义 annotation}
+
+提交版 \texttt{block\_cholesky.cpp} 仅增加
+\texttt{compiler2026.graph.block\_cholesky.tile\_dag.v1} 函数 annotation。
+它声明输出矩阵 \(L\) 的 row-major tile-DAG 语义，不携带规模、线程数或预计算结果。
+默认路径据此安全地将内层 \texttt{madd} 循环提升为 range submit；实验性跨 panel 路径还能在
+GEP 被优化为 PHI/指针差表达式时，从 \(L\) 基址恢复块坐标。
+
+\subsection{默认调度 lowering}
+
+当前默认路径不是完整跨 panel DAG，而是经实测选择的两阶段调度：
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance=6mm,
+    box/.style={draw=Primary,rounded corners=2pt,fill=Light,minimum height=10mm,
+                text width=2.55cm,align=center,font=\small},
+    sync/.style={draw=Accent,rounded corners=2pt,fill=Warn!18,minimum height=10mm,
+                 text width=2.1cm,align=center,font=\small\bfseries},
+    arr/.style={-{Latex[length=2.2mm]},thick,color=Secondary}
+  ]
+    \node[box] (c) {同步执行\\\texttt{cholesky}};
+    \node[box,right=of c] (t) {提交\\\texttt{trsm} range};
+    \node[sync,right=of t] (w1) {阶段 wait};
+    \node[box,right=of w1] (m) {提交二维\\\texttt{madd} range};
+    \node[sync,right=of m] (w2) {panel wait};
+    \draw[arr] (c) -- (t);
+    \draw[arr] (t) -- (w1);
+    \draw[arr] (w1) -- (m);
+    \draw[arr] (m) -- (w2);
+    \draw[arr] (w2.south) -- ++(0,-6mm) -| (c.south)
+      node[pos=0.45,below,font=\small,color=Muted] {进入下一 panel};
+  \end{tikzpicture}
+  \caption{当前默认的 panel 内两阶段调度}
+\end{figure}
+
+同一 panel 的 \texttt{trsm} 只依赖已同步完成的对角分解；第一次 wait 后，每个
+\texttt{madd} 写不同输出块，因此第二阶段可以使用无依赖 range submit。相比逐 \texttt{madd}
+建立两个输入依赖，阶段屏障牺牲少量 TRSM/MADD 重叠，却消除了单提交线程的哈希查询、DAG
+节点与边构造成本。该选择来自实测否证，不是对依赖关系的忽略。
+
+\subsection{TRSM range 与二维 MADD range}
+
+Pass 把每个 panel 的 TRSM 行循环整体 outline 为一次 range submit。每个逻辑 index 仍对应
+一行官方 \texttt{trsm} 调用，但提交线程不再为每行重复分配 context 和执行 submit：
+
+\begin{lstlisting}[language=C++,caption={TRSM range 的语义化伪代码}]
+void trsm_range(Context *ctx, int begin, int end) {
+  for (int row = begin; row < end; ++row) {
+    trsm(block(row), ctx->diag, block(row), ctx->b, ctx->n);
+  }
+}
+\end{lstlisting}
+
+MADD 阶段进一步把三角形 \((row,col)\) 迭代域划分为二维 group。一个逻辑任务在同一执行核上
+连续处理一组输出块，使多个官方 \texttt{madd} 调用复用仍在 cache 中的 A/B tile：
+
+\begin{lstlisting}[language=C++,caption={二维 MADD range 的语义化伪代码}]
+void madd_tile_range(Context *ctx, int begin, int end) {
+  for (int group = begin; group < end; ++group)
+    for (auto [row, col] : decode_triangular_group(group))
+      madd(A(row), B(col), C(row,col), ctx->b, ctx->n);
+}
+\end{lstlisting}
+
+运行时只返回 group width 和 range 切分，不解释 \((row,col)\) 的算子含义。默认宽度综合
+矩阵 block 数与 tile cache footprint：小 tile 使用 2--8 的分组宽度，\(b\ge28\) 时退化为 1。
+若 IR 形态不满足二维改写条件，Pass 保守回退到一维 MADD range；其默认目标工作量仍为
+200000 FLOP。两条任务函数都直接调用官方 ABI。
+
+\section{运行时功能}
+
+运行时使用 \texttt{thread\_local} 的调度器实例，核心能力包括：
+
+\begin{itemize}
+  \item \textbf{可复用线程池：}按进程可能需要的最大 worker 数预热，后续只增不减；每次调用
+        仅激活需要的参与者，多余 worker 停泊，避免跨 case 重建；
+  \item \textbf{主线程参与：}wait 期间主线程执行 ready task，使“线程数”近似等于
+        main + workers；
+  \item \textbf{arena context：}按调用批量分配 task context，避免逐任务 malloc/free；
+  \item \textbf{持久无锁 phase：}对 \(b<128\) 的无依赖 phase，以 epoch 发布不可变任务表，
+        worker 静态领取并写入 cache-line 对齐的完成标志，绕开逐任务队列锁；
+  \item \textbf{暂存与批量出队：}成熟队列回退路径按参与者数积累足够宽度，并根据 ready width
+        自适应取批；
+  \item \textbf{通用 range：}接收函数、context 与整数区间，支持默认粒度或显式 grain；
+  \item \textbf{局部性分组：}只根据 \(n,b\) 返回二维 range group width，具体坐标映射仍由 Pass 掌握；
+  \item \textbf{实验性 DAG：}保留 2/3 依赖 submit、priority、key wait 和 live-window，供
+        跨 panel 路径验证，默认关闭；
+  \item \textbf{可观测性：}可输出任务数、批量大小、ready width、queue/exec/idle 时间、
+        DAG 节点/边、wait 压力以及按任务名聚合的统计。
+\end{itemize}
+
+\section{功能清单}
+
+{\small
+\renewcommand{\arraystretch}{1.12}
+\begin{longtable}{L{3.25cm}L{4.4cm}L{3.0cm}L{3.0cm}}
+  \caption{主要功能与验证方式}\label{tab:functions}\\
+  \toprule
+  功能 & 实现方式 & 默认状态 & 验证证据 \\
+  \midrule
+  \endfirsthead
+  \toprule
+  功能 & 实现方式 & 默认状态 & 验证证据 \\
+  \midrule
+  \endhead
+  串行/异步版本化 & 克隆函数并由 runtime predicate 分派 & 开启 & 优化后 IR call-site 断言 \\
+  TRSM range & outline 行循环，每 panel 一次 range submit & 开启 & IR 中保留 \texttt{@trsm} \\
+  二维 MADD range & 三角域按 \((row,col)\) group 任务化 & 开启 & IR 中保留 \texttt{@madd} \\
+  两阶段同步 & TRSM 末尾与 MADD nest 末尾插入 wait & 开启 & \path{ir_wait_calls=2} \\
+  持久无锁 phase & epoch 发布、静态领取、逐 worker 完成标志 & \(b<128\) 开启 & Round 17 全量对照 \\
+  线程池复用与预热 & load-time 预热、调用间只增不减 & 开启 & 首个异步 case 对照 \\
+  自适应粒度与分组 & FLOP 预算 + cache/group width 模型 & 开启 & Round 15/19 扫描 \\
+  参与者选择 & fast phase 按 \(n\) 阶梯限流，队列路径按 \(b\) 限制 & 开启 & Round 17--25 扫描 \\
+  完整跨 panel DAG & 块 key、三依赖 submit、单 outer wait & 实验，关闭 & verifier smoke + 对照 CSV \\
+  关键路径优先级 & Pass 生成 0--3 rank & 实验，关闭 & 本机重复实验未胜出 \\
+  worker pinning & 读取 Linux affinity mask 并绑定 & 实验，关闭 & profile smoke \\
+  profile CSV & stderr 计数解析并并入 benchmark CSV & 按需开启 & 多份 profile CSV \\
+  \bottomrule
+\end{longtable}
+}
+
+\chapter{创新性说明}
+
+\section{创新点一：从低层 IR 恢复算子图语义}
+
+普通函数调用只暴露指针，经过 \texttt{-O2} 后，块地址可能表现为嵌套 GEP、PHI 或已折叠的
+指针算术。项目将 LoopInfo、调用参数模式和版本化 annotation 结合：默认路径识别稳定循环形态，
+实验路径以 \(L\) 为语义基址计算 element offset，再恢复 \((row,col)\) 与线性 block key。
+其价值在于把“源代码里显然的 tile 坐标”带回优化后的 IR，同时只增加一条允许的函数级标注。
+
+\section{创新点二：编译器生成一维/二维语义任务，运行时只管理区间}
+
+range task 没有把 \texttt{trsm}/\texttt{madd} 逻辑搬入 runtime。编译器生成的任务函数掌握
+参数推进和三角域坐标映射，runtime 仅决定区间如何切块、二维 group 多宽。这种职责拆分同时满足
+三个要求：保留官方算子 ABI、让粒度与局部性按目标平台调整、保持调度器可复用于其他循环任务。
+
+\section{创新点三：用证据选择同步结构}
+
+完整依赖图在理论上暴露更多重叠，但逐任务依赖维护可能比重叠收益更昂贵。项目通过 profile
+发现单提交线程构图时，worker 在“等待新节点”和“争抢共享队列”之间振荡。于是默认路径将
+可证明安全的阶段边压缩为两个 wait，并进一步为无依赖 phase 建立持久 epoch session；依赖 submit
+仍保留为实验通道。该方法体现的是
+\textbf{以任务图成本模型选择表示}：不是 DAG 越细越好，而是应让依赖表达的成本与可获得的
+关键路径收益匹配。
+
+\section{创新点四：可复现的性能证据链}
+
+项目将以下证据组合成闭环：
+
+\begin{enumerate}
+  \item verifier 过滤所有数值错误；
+  \item 优化后 IR 统计 submit、wait 和官方算子调用，防止“跑得快但没改到”或越界改写；
+  \item profile 将队列宽度、任务执行、空闲与依赖状态写入 CSV；
+  \item 逐用例脚本按评测公式计算等权几何平均；
+  \item 当总差异落在噪声带内时，按“机制上会被改动影响/不会被影响”做配对分组对照。
+\end{enumerate}
+
+上述创新是相对于本赛题 baseline 的工程与编译优化创新，不主张其为通用任务运行时领域的
+首次提出。
+
+\chapter{测试方法与正确性}
+
+\section{有效性能平台}
+
+\begin{table}[H]
+  \centering
+  \caption{Round 28 当前主线 AArch64 测试环境}
+  \begin{tabularx}{\textwidth}{L{3.4cm}Y}
+    \toprule
+    项目 & 配置 \\
+    \midrule
+    处理器 & HiSilicon AArch64，40 核，单 NUMA，2.9~GHz 定频，L3 32~MiB \\
+    操作系统 & openEuler 22.03 LTS，Linux 5.10 \\
+    工具链 & BiSheng Enterprise 3.2.0.1.B004，Clang/LLVM 15.0.4 \\
+    内存约束 & 容器 cgroup 硬上限 2~GiB \\
+    用例 & 官方 150 个公开用例 \\
+    重复方式 & \texttt{PASSES=3, REPEAT=1}，每个 case 取三次整进程运行的最小值 \\
+    正确性 & 串行参考与参赛输出均运行官方 verifier \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+该平台与官方环境具有相同 ISA、OS 家族和 BiSheng/LLVM 主版本，因此作为当前最有效的性能
+证据。40 物理核 x86\_64 Xeon 结果只用于同机调试和机制归因，不能与 AArch64 绝对时间混用。
+
+\section{评分口径}
+
+对第 \(i\) 个用例，令串行时间为 \(T_{0,i}\)，参赛程序时间为 \(T_i\)：
+
+\begin{align*}
+  s_i &= \frac{T_{0,i}}{T_i},\\
+  S_{geo} &= \exp\!\left(\frac{1}{N}\sum_{i=1}^{N}\ln s_i\right),\\
+  P &= 100\frac{S_{geo}}{m_{ideal}},\\
+  Score &= 0.4F+0.6P.
+\end{align*}
+
+在功能分 \(F=100\)、\(m_{ideal}=32\) 时，
+\(Score=40+1.875S_{geo}\)。逐用例等权意味着 \(n=128\) 与 \(n=2048\) 权重相同；
+总时间比实际按计算量偏向大用例，因此只能作为吞吐参考。
+
+\section{正确性与结构性检查}
+
+Round 28 当前主线全量结果为 \textbf{150/150 verifier PASS}。此外，逐用例测试在优化后 IR 中
+断言：存在 submit；存在两处 runtime wait；Pass 生成的任务函数中仍有官方
+\texttt{@trsm} 与 \texttt{@madd} 调用。归档记录的默认路径计数为：
+
+\begin{center}
+\texttt{ir\_submits=2 (plain=0, range=2, deps=0), ir\_wait\_calls=2,}\par
+\texttt{ir\_trsm\_calls=3, ir\_madd\_calls=4.}
+\end{center}
+
+这里的计数是静态 call site 数，不是运行时任务总数。它用于证明变换形态和 ABI 保留，不能
+代替数值 verifier。
+
+\section{内存受限下的分段测量}
+
+150 个 case 的输入和输出同时驻留约 2.46~GB，超过目标容器 2~GiB 限制。项目按声明尺寸把
+spec 切为不超过 600~MB 驻留数据的 5 段，分别测量后恢复全局 case index 再统一评分。
+计时单位是单次 \texttt{block\_cholesky} 调用；线程池预热已移出计时区，因而分段不会改变
+单 case 计时定义。该方法避免 OOM，同时保留评测口径。
+
+\chapter{性能结果与分析}
+
+\section{全量公开用例结果}
+
+\begin{table}[H]
+  \centering
+  \caption{AArch64 全量结果摘要}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    版本 & PASS & 几何平均 & 总时间比 & 折算总分 \\
+    \midrule
+    Round 15：AArch64 粒度重标定 & 150/150 & 4.370× & 7.782× & 48.19 \\
+    Round 17：持久无锁 phase & 150/150 & 6.123× & 9.617× & 51.48 \\
+    Round 20：二维 MADD tiling & 150/150 & 7.006× & 11.257× & 53.14 \\
+    Round 27：TRSM range & 150/150 & 7.386× & 11.751× & 53.85 \\
+    \textbf{Round 28：当前 HEAD 校准} & \textbf{150/150} & \textbf{7.386502×} & \textbf{11.660466×} & \textbf{53.85} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Round 28 的 150 个 speedup 中位数为 8.229×，最小值 0.891×，最大值 39.645×；11 个
+用例低于 1×，其中 6 个低于 0.95×。当前 HEAD 的代码与被测提交一致；Round 28 只在合并后
+重新建立当前基线，没有把历史分支成绩直接借给主线。
+
+\section{按块大小分桶}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.88\textwidth,height=6.8cm,
+      ybar,bar width=19pt,
+      ymin=0,ymax=11,
+      ylabel={等权几何平均加速比},
+      symbolic x coords={small,mid,medium,large},
+      xtick=data,
+      xticklabels={$b<12$,$12\le b<32$,$32\le b<128$,$b\ge128$},
+      nodes near coords,
+      nodes near coords align={vertical},
+      axis line style={draw=Muted},
+      tick label style={font=\small},
+      grid=major,grid style={draw=CodeFrame},
+      every axis plot/.append style={fill=Secondary!80,draw=Primary}
+    ]
+      \addplot coordinates {(small,7.755) (mid,9.748) (medium,8.176) (large,3.872)};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Round 28 当前主线按块大小分桶的几何平均加速比}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \caption{分桶统计与解释}
+  \begin{tabularx}{\textwidth}{L{2.6cm}C{1.4cm}C{2.1cm}Y}
+    \toprule
+    块大小 & 用例数 & 几何平均 & 主要解释 \\
+    \midrule
+    \(b<12\) & 22 & 7.755× & 无锁 phase、二维复用与 TRSM range 消除了大部分细粒度固定成本 \\
+    \(12\le b<32\) & 39 & 9.748× & 当前收益最高；仍受每 panel 固定延迟和必需内存流量影响 \\
+    \(32\le b<128\) & 61 & 8.176× & 用例数最多，是继续提升全量成绩的主要覆盖区 \\
+    \(b\ge128\) & 28 & 3.872× & 块数少，已达到相位结构上限约 94\%，不再优先投入 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{平台粒度重标定：Round 14 到 Round 15}
+
+range task 的目标预算从 Xeon 上标定的 50000 FLOP 改为 AArch64 上的 200000 FLOP。
+全量几何平均从 4.253× 提高到 4.370×，增幅 2.7\%，小于该主机 5.7--9.6\% 的运行间
+噪声，单看总数不足以采纳。项目按“两个预算是否会改变 chunk 长度”分组：
+
+\begin{table}[H]
+  \centering
+  \caption{Round 15 配对分组对照}
+  \begin{tabular}{lrrrr}
+    \toprule
+    分组 & 用例数 & 50000 FLOP & 200000 FLOP & 变化 \\
+    \midrule
+    受影响（\(b\le36\)） & 80 & 3.383× & 3.553× & \textbf{+5.0\%} \\
+    对照（\(b\ge40\)） & 70 & 5.524× & 5.535× & +0.2\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+对照组仅 +0.2\%，说明主机整体漂移很小；受影响组 +5.0\%，且 \(b=18,24,28\) 等组
+同向改善，因此该改动有机制一致的证据。这个案例同时说明：以 FLOP 表示“约若干微秒的任务”
+仍是平台相关代理量，不能从 x86 直接移植到 AArch64。
+
+\section{Round 16：线程扩展与执行归因}
+
+Round 16 在同一 AArch64 平台固定 \(n=1152\)，扫描 8/16/24/32/40 个参与者，分别观察
+小、中、大块。该实验用于定位瓶颈，不是新的 150 case 全量成绩。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.92\textwidth,height=7.5cm,
+      xlabel={参与者数},ylabel={加速比},
+      xtick={8,16,24,32,40},
+      ymin=2,ymax=18,
+      grid=major,grid style={draw=CodeFrame},
+      legend columns=3,
+      legend style={at={(0.5,-0.22)},anchor=north,draw=none},
+      line width=1.1pt,mark size=2.2pt
+    ]
+      \addplot[color=Accent,mark=*] coordinates {(8,3.3790)(16,3.2556)(24,3.1541)(32,2.9806)(40,2.8266)};
+      \addlegendentry{$b=8$}
+      \addplot[color=Warn!85!black,mark=square*] coordinates {(8,4.1411)(16,4.7690)(24,4.6864)(32,4.5376)(40,4.4629)};
+      \addlegendentry{$b=12$}
+      \addplot[color=Secondary,mark=triangle*] coordinates {(8,6.4934)(16,9.8633)(24,11.7236)(32,12.6102)(40,12.6043)};
+      \addlegendentry{$b=32$}
+      \addplot[color=Good,mark=diamond*] coordinates {(8,6.7027)(16,10.9373)(24,13.5297)(32,15.3595)(40,16.4507)};
+      \addlegendentry{$b=64$}
+      \addplot[color=Primary,mark=pentagon*] coordinates {(8,5.5095)(16,7.5205)(24,8.3272)(32,8.8587)(40,9.0703)};
+      \addlegendentry{$b=128$}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Round 16：不同块大小的线程扩展曲线（\(n=1152\)）}
+\end{figure}
+
+\(b=8\) 从 8 参与者的 3.379× 下降到 40 参与者的 2.827×，累计 worker idle 从
+122.274~ms 增至 1504.563~ms；\(b=12\) 在 16 参与者达到峰值 4.769×；\(b=32\) 在
+32 参与者后基本饱和。对照中，\(b=64\) 从 6.703× 持续扩展到 16.451×，\(b=128\)
+从 5.510× 扩展到 9.070×。这表明小块问题不是“任务图没有足够并行度”，而是增加参与者后
+执行效率下降；当时的候选原因是内存带宽/缓存复用不足或共享队列竞争。后续 Round 17 用持久
+无锁 phase 消除了逐 task 队列交接，Round 20 用二维 MADD 分组增加 A/B tile 复用；二维后
+\(b=8\) 从 32 到 40 参与者仅由 13.45× 增至 13.55×，最终确认该桶已进入带宽平台。
+
+\section{噪声与结论边界}
+
+\begin{warningbox}[title=性能数字的使用边界]
+同一配置的全量运行可出现约 5.7\% 差异，\(b=8\) 还存在约 \(\pm10\%\) 的代码布局敏感性。
+因此 3\% 以内的孤立差异不应宣称为优化收益；应采用重复测量、逐 case 配对、机制分组和
+不受影响对照组。AArch64 与 Xeon 之间只比较趋势，不能比较绝对时间或直接合并几何平均。
+\end{warningbox}
+
+\chapter{优化迭代：瓶颈定位与方案收敛}
+
+本项目的优化路径不是先确定一个复杂调度架构再一次实现，而是让每轮 profile、逐用例结果和
+负实验决定下一步。Git 历史完整保留了这种“发现问题---建立假设---做机制对照---采纳或回退---
+重新全量验证”的过程。
+
+\section{Git 历史中的主线}
+
+{\small
+\begin{longtable}{L{1.8cm}L{2.2cm}L{4.5cm}L{5.5cm}}
+  \caption{关键提交与优化决策}\label{tab:git-path}\\
+  \toprule
+  阶段 & 提交 & 当时暴露的问题 & 决策与结果 \\
+  \midrule
+  \endfirsthead
+  \toprule
+  阶段 & 提交 & 当时暴露的问题 & 决策与结果 \\
+  \midrule
+  \endhead
+  Round 10 & \texttt{4a4a90d}\newline\texttt{de41d5c} & participant cap 掩盖真实调度缺陷；
+  单提交线程构图时 worker 饿死 & 先否证“2.4× 是结构上限”，再定位逐任务 DAG 和共享队列成本 \\
+  Round 11 & \texttt{cb74bb0} & 依赖边、提交暂存与线程池重建共同放大固定开销 &
+  改为 panel 两阶段屏障，提交深度随参与者扩展，线程池只增不减 \\
+  Round 13 & \texttt{e09a3ff} & 每个 MADD 一个 context/submit，任务比队列往返还短 &
+  Pass outline range，runtime 按工作量切分，并把预热移出计时区 \\
+  Round 15 & \texttt{10c91cf} & Xeon 上的 50000 FLOP 粒度迁移到 AArch64 后过细 &
+  目标平台重扫到 200000 FLOP；建立五段全量测量链，得分 48.19 \\
+  Round 17--25 & \texttt{ea2be87} & 无依赖 phase 仍反复经过共享队列；小 tile 缺少 A/B 复用 &
+  持久无锁 epoch session + 二维 MADD tiling，得分依次到 51.48、53.14 \\
+  Round 26--27 & \texttt{ee7d654} & MADD 变快后，每 panel 的逐行 TRSM context/submit 成为固定延迟 &
+  TRSM range outlining，得分到 53.85 \\
+  Round 28 & \texttt{9013c03} & 分支合并后的主线不能直接借用历史成绩 &
+  对干净当前源码重建并跑 150 case，确认 7.386502× / 53.85 \\
+  \bottomrule
+\end{longtable}
+}
+
+\section{瓶颈一：细粒度 DAG 的元数据和共享队列成本}
+
+\textbf{问题。}最初把每个 \texttt{madd} 表示为带两个输入依赖的 DAG 节点。理论重叠增加了，
+但提交线程要为每个节点分配 context、查询 producer key、建立 successor 边并发布到共享队列。
+在 \(n=1152,b=16\) 的 profile 中，固定任务数达到 64752，而主线程只执行极少任务；增加核心后，
+worker 在“等提交线程产生新节点”和“争抢 ready queue”之间振荡。
+
+\textbf{第一次解决。}Round 11 先在可证明无写冲突的位置插入 TRSM/MADD 两阶段 wait，使默认
+路径不再为每个 MADD 维护依赖边；同时把提交暂存深度与参与者数解耦，避免暂存批次小于等待
+worker 数时退化为一任务一次锁，并让线程池跨 case 只增不减。这一步把问题从“复杂 DAG 供给不足”
+收敛为“无依赖 phase 如何低成本执行”。
+
+\textbf{最终解决。}Round 17 为 \(b<128\) 的无依赖 phase 建立持久 epoch session：提交端一次
+发布不可变任务表，worker 以静态步长领取，完成时只写入各自 cache line。这样每个 task 不再经过
+共享队列、mutex 与 futex。以同一 AArch64 全量口径衡量，geomean 从 Round 15 的 4.370× 提高到
+\textbf{6.123×}，折算总分从 48.19 提高到 \textbf{51.48}。
+
+\begin{summarybox}[title=亮点一：让任务表示的成本匹配任务本身]
+项目没有继续堆叠依赖图功能，而是先证明依赖维护是关键路径，再把可证明安全的 phase 压缩为
+两个 wait，并把无依赖执行降为 epoch 发布与静态领取。完整 DAG 和 work stealing 仍保留为
+默认关闭的研究入口，但不再污染已验证主线。
+\end{summarybox}
+
+\section{瓶颈二：任务粒度与目标平台不匹配}
+
+\textbf{问题。}单个 MADD 只有约 \(2b^3\) FLOP，小 \(b\) 时 context 分配、submit 和队列往返
+可能超过计算本身。Round 10 的隔离探针还表明，\(b=8\) 需要把一整段 \(k\) 循环合并后才能
+摊平固定成本。
+
+\textbf{编译器方案。}Round 13 由 Pass 把连续迭代 outline 成 range task，运行时只接收
+\([begin,end)\) 并按工作量切分；任务函数仍逐次调用官方 \texttt{madd}。同时通过 load-time
+丢弃并行区完成线程池、worker 栈和 futex 预热，避免首个异步 case 独自承担初始化。
+
+\textbf{迁移困难。}最初的 50000 FLOP 粒度来自 Xeon。换到 AArch64 后，串行 kernel 时间约为
+Xeon 的 0.55 倍，相同 FLOP 对应的任务更短，原参数反而过细。Round 15 在目标平台重扫五档预算，
+把默认值改回 200000 FLOP。受影响的 80 个用例 geomean 提高 5.0\%，不受影响的 70 个控制用例
+只变化 0.2\%；全量从 4.253× 提高到 4.370×。
+
+\begin{summarybox}[title=亮点二：Pass 传递语义区间，runtime 决定粒度]
+粒度不是写死在 IR 中的任务数量，而是由编译器生成可解释的 range，再由通用 runtime 按平台
+工作量切分。该设计既保留官方 ABI，也让“同一变换、不同平台重新标定”成为可控流程。
+\end{summarybox}
+
+\section{瓶颈三：小 tile 的跨任务访存缺少复用}
+
+\textbf{问题。}Round 16 的线程曲线显示，旧实现中 \(b=8\) 从 8 参与者的 3.379× 下降到 40
+参与者的 2.827×。这不是并行度不够，而是执行效率随核心数下降。消除共享队列成本后，小 tile
+仍很快触及带宽平台，说明只沿 \(k\) 粗化的任务会反复流过相同 A/B tile。
+
+\textbf{编译器方案。}Round 20 把 MADD 的三角迭代域改写为二维
+\((row\_group,col\_group)\) range。一个逻辑任务连续完成同一二维 group 内的多个官方
+\texttt{madd} 调用，在执行核的 cache 中复用 A/B tile；group width 由 block 数和 tile footprint
+共同决定。该改动不修改算子、ABI、运算顺序和 panel barrier。
+
+\textbf{结果与边界。}受影响的 \(b<28\) 组逐用例配对为 1.3067×，\(b\ge28\) 控制组为
+0.9987×；全量 geomean 从 6.123× 提高到 \textbf{7.006×}，得分到 \textbf{53.14}。
+二维后 \(n=1152,b=8\) 在 32/40 参与者分别为 13.45×/13.55×，表明该桶已从队列瓶颈推进到
+真实内存带宽平台。
+
+\begin{summarybox}[title=亮点三：在 LLVM Pass 中重排任务域，而不是替换算子]
+项目以二维任务分组改善局部性，但每个数值更新仍原样进入官方 \texttt{madd}。这是一项可由
+IR 语义证明正确的循环/任务域变换，性能收益也由受影响组与控制组的同轮对照确认。
+\end{summarybox}
+
+\section{瓶颈四：每 panel 的 TRSM 固定提交延迟}
+
+\textbf{问题。}MADD 路径变快后，提交线程仍要在每个 panel 为每一行 TRSM 分配 context、写参数
+并 submit。对于小 tile，单次 TRSM 很短，这段串行固定工作进入关键路径；继续调 MADD 粒度已经
+不能消除它。
+
+\textbf{编译器方案。}Round 26--27 新增 \texttt{compiler2026\_task\_trsm\_range}，每个 panel
+只分配一个 context 并提交一次 range；逻辑 index 仍对应一行官方 \texttt{trsm}，grain 固定为 1，
+TRSM/MADD 与 panel 间的 wait 均保持不变。
+
+\textbf{机制对照。}同轮开/关实验中，\(b<12\) 提高 1.1400×，\(12\le b<32\) 提高 1.0800×，
+而 \(b\ge32\) 控制组仅 1.0019×。全量 geomean 从 7.005795× 提高到 7.385822×；Round 28
+对合并后的当前主线重测为 \textbf{7.386502× / 53.85 分}。
+
+\begin{summarybox}[title=亮点四：持续消除编译器生成的串行固定工作]
+当数值 kernel 与 MADD 调度都变快后，新的瓶颈转移到 TRSM 的逐迭代提交序列。项目再次使用
+range outlining 消除固定延迟，并用“大 tile 控制组不动、小 tile 受影响组提升”证明因果关系。
+\end{summarybox}
+
+\section{困难、负结果与路线收敛}
+
+\begin{longtable}{L{3.3cm}L{5.0cm}L{5.4cm}}
+  \caption{工程困难与处理原则}\label{tab:difficulties}\\
+  \toprule
+  困难 & 风险 & 处理方式 \\
+  \midrule
+  \endfirsthead
+  \toprule
+  困难 & 风险 & 处理方式 \\
+  \midrule
+  \endhead
+  指标口径曾不一致 & suite 总时间比由大用例主导，会把优化优先级带偏 &
+  建立逐 case harness，统一使用等权几何平均和评分公式 \\
+  2~GiB cgroup OOM & 150 case 输入+输出约 2.46~GB，整套运行 exit 137 &
+  按声明内存量切成 5 段，恢复全局 index 后统一评分 \\
+  运行/布局噪声 & 小于 3\% 的总差异可能是漂移，\(b=8\) 还有约 \(\pm10\%\) 布局敏感性 &
+  重复测量，并按机制划分受影响组和控制组 \\
+  优化破坏数值或发布域 & fast phase 曾因任务表部分走快路径、部分走队列而出现 verifier \texttt{inf} &
+  发布域保持完整；任何候选必须逐 case verifier 与 IR 结构断言同时通过 \\
+  \bottomrule
+\end{longtable}
+
+完整跨 panel DAG、关键路径 rank、两级完成屏障、共享原子 counter、tile packing、静态连续分配、
+按 phase 宽度缩参与者和 work stealing 原型都经过对照但未超过默认路径，因此被回退或保持默认关闭。
+这些负结果不是旁支：它们逐步排除了“图不够细”“屏障太多”“队列形态必须更复杂”等假设，使主线
+最终聚焦在任务元数据、局部性和固定延迟三个可测成本上。
+
+\section{当前尚未解决的瓶颈}
+
+\begin{itemize}
+  \item \textbf{小 tile 带宽平台：}\(b=8\) 在 32 核后基本不再扩展；下一步必须减少必需 C 流量
+        或改变更新复用方式，单纯增加参与者无效。
+  \item \textbf{中等 tile 执行效率：}\(12\le b<32\) 与 \(32\le b<128\) 分别只达到 Round 15
+        零开销相位模型上限的约 31.9\% 与 63.4\%，且覆盖 100/150 个用例，是主要分数杠杆。
+  \item \textbf{小矩阵每 panel 固定延迟：}TRSM range 已消除一层逐行提交，但 begin/end、wait、
+        metadata 初始化等固定工作仍会在短矩阵中占主导。
+  \item \textbf{到 60 分仍需结构量级：}当前 7.3865× 到 60 分所需 10.667× 仍差全量 1.444×；
+        小常量、换 barrier 或重新启用 work stealing 都没有这一覆盖面。
+\end{itemize}
+
+\chapter{后续路线与风险}
+
+\section{优先级路线}
+
+\begin{enumerate}
+  \item \textbf{减少必需内存流量：}围绕 C tile 的读写与复用设计新的分组/更新顺序；现有二维
+        tiling 已复用 A/B，但 \(b=8\) 的 32--40 核平台表明 C 流量仍构成硬上限。
+  \item \textbf{继续压缩每 panel 固定工作：}检查 group decode、context 初始化、range begin/end
+        和两次 wait 的固定成本，优先选择能覆盖 \(12\le b<128\) 大量用例的 Pass 变换。
+  \item \textbf{形状自适应而非继续拟合单常量：}联合 \(n,b,block\_count\) 选择 group width、
+        参与者数和 grain；候选先做跨矩阵配对，再进行 150 case 全量验证。
+  \item \textbf{硬件计数器闭环：}在 AArch64 上记录 bandwidth、cache/TLB、cycles 与同步事件，
+        验证改动是否真正减少每次官方算子的内存/控制成本。
+  \item \textbf{延后调度结构替换：}跨 panel DAG、work stealing、barrier 替换已经多轮否证；只有
+        当前执行效率接近相位模型上限后，才重新评估 bounded look-ahead 或 NUMA 调度。
+\end{enumerate}
+
+\section{主要风险与缓解}
+
+\begin{table}[H]
+  \centering
+  \caption{项目风险}
+  \small
+  \renewcommand{\arraystretch}{1.12}
+  \begin{tabularx}{\textwidth}{L{3.2cm}Y Y}
+    \toprule
+    风险 & 影响 & 缓解 \\
+    \midrule
+    IR 形态随优化管线变化 & Pass 无法识别或误恢复块坐标 & 版本化 annotation、保守回退、IR 断言 \\
+    启发式过拟合公开用例 & 隐藏 case 或目标机退化 & 分层采样、环境覆盖、目标平台复测、限制常量数量 \\
+    细粒度并行破坏数值顺序 & verifier 失败 & 只并行无写冲突任务，阶段 wait，逐 case verifier \\
+    小 tile 在 32 核后带宽饱和 & 增核不再提高速度，甚至增加同步和缓存压力 & 减少 C 流量、硬件计数器、控制参与者 \\
+    文档与代码默认值漂移 & 复现实验使用不同阈值 & 命令显式设置全部关键变量，并以 CSV 元数据为准 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\enlargethispage{3\baselineskip}
+特别需要注意：runtime 当前无环境覆盖时的异步阈值为 8，而
+\path{submission/scripts/smoke_test.sh} 与 \path{benchmark.sh} 的脚本默认值仍为 12。
+Round 28 的逐 case harness 不注入该变量，使用 runtime 默认值。复现当前基线应使用本章的
+per-case 命令；运行普通 smoke/benchmark 时则应显式写出阈值，避免把脚本默认与提交默认混用。
+
+\chapter{复现、构建与证据索引}
+
+\section{构建与 smoke test}
+
+在 openEuler/BiSheng 环境中：
+
+\begin{lstlisting}[language=bash]
+source /etc/profile.d/bisheng.sh
+./submission/scripts/build.sh
+
+# 显式统一异步阈值，避免脚本默认值与 runtime 默认值不同
+SPEC_START=91 SPEC_END=96 \
+COMPILER2026_DAG_THREADS=40 \
+COMPILER2026_ASYNC_MIN_B=8 \
+COMPILER2026_ASYNC_MIN_BLOCKS=2 \
+./submission/scripts/smoke_test.sh
+\end{lstlisting}
+
+\section{Round 28 当前基线同口径复现}
+
+在 2~GiB 受限的 40 核 AArch64 机器上：
+
+\begin{lstlisting}[language=bash]
+LABEL=r28_reproduce PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+\end{lstlisting}
+
+当前正式基线使用 runtime/Pass 默认配置，日志中的 \texttt{runtime env} 应为
+\texttt{<defaults>}。输出合并 CSV 位于
+\texttt{docs/benchmark\_results/r28\_reproduce.csv}。任何性能结论都必须同时满足 verifier
+全 PASS，并记录 source commit、source dirty 状态、工具链、CPU affinity 和原始 CSV。
+
+\section{关键证据文件}
+
+\begin{longtable}{L{5.2cm}L{8.3cm}}
+  \caption{报告引用的仓库证据}\label{tab:evidence}\\
+  \toprule
+  路径 & 内容 \\
+  \midrule
+  \endfirsthead
+  \toprule
+  路径 & 内容 \\
+  \midrule
+  \endhead
+  \path{docs/benchmark_results/r28_head5394c43_cg_baseline.csv} & 当前 HEAD 的 150 case 合并基线 \\
+  \path{docs/benchmark_results/r28_head5394c43_baseline.log} & 源码状态、五段 verifier、IR 断言与评分日志 \\
+  \path{docs/benchmark_results/r27_cg_trsm_range.csv} & TRSM range 后的全量数据 \\
+  \path{docs/benchmark_results/r26_trsm_range_off.csv} & TRSM range 同轮关闭对照 \\
+  \path{docs/benchmark_results/r26_trsm_range_on.csv} & TRSM range 同轮开启实验 \\
+  \path{docs/benchmark_results/r20_cg_tile_group_default.csv} & 二维 MADD tiling 全量数据 \\
+  \path{docs/benchmark_results/r17_cg_fast_phase_default.csv} & 持久无锁 phase 全量数据 \\
+  \path{docs/benchmark_results/r15_cg_flops200k.csv} & Round 15 AArch64 粒度重标定基线 \\
+  \path{docs/benchmark_results/r15_cg_range_flops_sweep.csv} & 五档 range 工作量扫描 \\
+  \path{docs/benchmark_results/r16_exec_attrib.csv} & \(b=8,12,32\) 的执行归因 \\
+  \path{docs/benchmark_results/r22_post_tile_threads.csv} & 二维 tiling 后的线程扩展与带宽平台证据 \\
+  \path{docs/roadmap.md} & 当前基线、已否证路线与下一步约束 \\
+  \path{docs/engineering_log.md} & 各轮变更、负结果和经验 \\
+  \path{docs/technical_scheme_notes.md} & 赛题规则与评分口径摘录 \\
+  \path{submission/pass/dag_pass.cpp} & 当前 Pass 实现 \\
+  \path{submission/runtime/dag_runtime.cpp} & 当前 runtime 实现 \\
+  \path{scripts/score_judge.py} & 等权逐 case 几何平均与分数计算 \\
+  \bottomrule
+\end{longtable}
+
+\section{可调参数速查}
+
+\begin{longtable}{L{5.0cm}L{2.6cm}L{6.0cm}}
+  \caption{主要运行时开关}\label{tab:knobs}\\
+  \toprule
+  环境变量 & runtime 默认 & 用途 \\
+  \midrule
+  \endfirsthead
+  \toprule
+  环境变量 & runtime 默认 & 用途 \\
+  \midrule
+  \endhead
+  \path{COMPILER2026_DAG_THREADS} & 硬件线程数 & 限制总参与者数 \\
+  \path{COMPILER2026_ASYNC_MIN_B} & 8 & 异步路径最小块大小 \\
+  \path{COMPILER2026_ASYNC_MIN_BLOCKS} & 2 & 异步路径最小块数 \\
+  \path{COMPILER2026_RANGE_TASK_FLOPS} & 200000 & range task 目标工作量 \\
+  \path{COMPILER2026_RANGE_GROUP_WIDTH} & 自动 & 二维 MADD group 宽度；\texttt{1} 关闭分组 \\
+  \path{COMPILER2026_TRSM_RANGE} & 1 & Pass 中启用 TRSM range outlining \\
+  \path{COMPILER2026_DAG_FAST_PHASE} & \(b<128\) 开启 & 启用持久无锁 phase 执行 \\
+  \path{COMPILER2026_DAG_IDLE_SPIN} & fast phase 时 20000 & phase 间短时自旋预算 \\
+  \path{COMPILER2026_TASK_BATCH} & 自动 & 单次消费批量上限 \\
+  \path{COMPILER2026_DAG_PARTICIPANT_CAP} & 形状自适应 & 显式参与者上限；\texttt{off} 关闭限制 \\
+  \path{COMPILER2026_DAG_PROFILE} & 0 & 输出运行时统计 \\
+  \path{COMPILER2026_ENABLE_CROSS_PANEL_DAG} & 0 & 启用实验性完整 DAG lowering \\
+  \path{COMPILER2026_CROSS_PANEL_SYNC_CHOLESKY} & 0 & 跨 panel 时保留同步 cholesky \\
+  \path{COMPILER2026_DAG_MAX_LIVE} & 0 & 实验路径 live-window \\
+  \path{COMPILER2026_DAG_CRITICAL_PRIORITY} & 0 & 启用 Pass 生成的 rank \\
+  \path{COMPILER2026_DAG_PIN_WORKERS} & 0 & Linux worker affinity 实验 \\
+  \bottomrule
+\end{longtable}
+
+\chapter{总结}
+
+本项目已经完成从官方 baseline IR 到可验证并行程序的完整编译链：Pass 负责识别、版本化、
+任务函数生成与同步插入；通用 runtime 负责线程池、range 切分、批量调度和 profile；测试脚本
+负责 verifier、IR 结构断言和逐用例评分。当前最有效结果为 AArch64 150/150 PASS、等权几何
+平均 \textbf{7.386502×}、折算总分 \textbf{53.85}。
+
+项目最重要的结论并非“依赖越细越好”，而是：依赖表示、任务粒度、队列宽度、初始化成本和
+评测指标共同决定最终收益。项目沿 Git 历史逐步解决细粒度 DAG 元数据、平台粒度、MADD 局部性
+和 TRSM 固定提交延迟四个核心瓶颈；每次结构改动都由 verifier、IR 断言、受影响/控制组和全量
+CSV 共同确认。下一阶段应优先减少小 tile 的必需内存流量，并继续压缩覆盖中等 tile 的固定工作。
+
+\end{document}

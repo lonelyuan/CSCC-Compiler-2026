@@ -1,0 +1,48 @@
+\contentsline {chapter}{摘要}{I}{chapter*.1}%
+\contentsline {chapter}{\numberline {第1章\hspace {.3em}}项目背景与目标}{1}{chapter.1}%
+\contentsline {section}{\numberline {1.1}赛题任务}{1}{section.1.1}%
+\contentsline {section}{\numberline {1.2}设计目标与边界}{1}{section.1.2}%
+\contentsline {section}{\numberline {1.3}提交物组成}{2}{section.1.3}%
+\contentsline {chapter}{\numberline {第2章\hspace {.3em}}功能与系统设计}{3}{chapter.2}%
+\contentsline {section}{\numberline {2.1}总体流程}{3}{section.2.1}%
+\contentsline {section}{\numberline {2.2}LLVM Pass 功能}{3}{section.2.2}%
+\contentsline {subsection}{\numberline {2.2.1}IR 版本化与运行时分派}{3}{subsection.2.2.1}%
+\contentsline {subsection}{\numberline {2.2.2}算子 outline 与 ABI 保留}{3}{subsection.2.2.2}%
+\contentsline {subsection}{\numberline {2.2.3}版本化语义 annotation}{4}{subsection.2.2.3}%
+\contentsline {subsection}{\numberline {2.2.4}默认调度 lowering}{4}{subsection.2.2.4}%
+\contentsline {subsection}{\numberline {2.2.5}TRSM range 与二维 MADD range}{4}{subsection.2.2.5}%
+\contentsline {section}{\numberline {2.3}运行时功能}{5}{section.2.3}%
+\contentsline {section}{\numberline {2.4}功能清单}{5}{section.2.4}%
+\contentsline {chapter}{\numberline {第3章\hspace {.3em}}创新性说明}{7}{chapter.3}%
+\contentsline {section}{\numberline {3.1}创新点一：从低层 IR 恢复算子图语义}{7}{section.3.1}%
+\contentsline {section}{\numberline {3.2}创新点二：编译器生成一维/二维语义任务，运行时只管理区间}{7}{section.3.2}%
+\contentsline {section}{\numberline {3.3}创新点三：用证据选择同步结构}{7}{section.3.3}%
+\contentsline {section}{\numberline {3.4}创新点四：可复现的性能证据链}{7}{section.3.4}%
+\contentsline {chapter}{\numberline {第4章\hspace {.3em}}测试方法与正确性}{8}{chapter.4}%
+\contentsline {section}{\numberline {4.1}有效性能平台}{8}{section.4.1}%
+\contentsline {section}{\numberline {4.2}评分口径}{8}{section.4.2}%
+\contentsline {section}{\numberline {4.3}正确性与结构性检查}{9}{section.4.3}%
+\contentsline {section}{\numberline {4.4}内存受限下的分段测量}{9}{section.4.4}%
+\contentsline {chapter}{\numberline {第5章\hspace {.3em}}性能结果与分析}{10}{chapter.5}%
+\contentsline {section}{\numberline {5.1}全量公开用例结果}{10}{section.5.1}%
+\contentsline {section}{\numberline {5.2}按块大小分桶}{10}{section.5.2}%
+\contentsline {section}{\numberline {5.3}平台粒度重标定：Round 14 到 Round 15}{11}{section.5.3}%
+\contentsline {section}{\numberline {5.4}Round 16：线程扩展与执行归因}{11}{section.5.4}%
+\contentsline {section}{\numberline {5.5}噪声与结论边界}{12}{section.5.5}%
+\contentsline {chapter}{\numberline {第6章\hspace {.3em}}优化迭代：瓶颈定位与方案收敛}{13}{chapter.6}%
+\contentsline {section}{\numberline {6.1}Git 历史中的主线}{13}{section.6.1}%
+\contentsline {section}{\numberline {6.2}瓶颈一：细粒度 DAG 的元数据和共享队列成本}{13}{section.6.2}%
+\contentsline {section}{\numberline {6.3}瓶颈二：任务粒度与目标平台不匹配}{14}{section.6.3}%
+\contentsline {section}{\numberline {6.4}瓶颈三：小 tile 的跨任务访存缺少复用}{14}{section.6.4}%
+\contentsline {section}{\numberline {6.5}瓶颈四：每 panel 的 TRSM 固定提交延迟}{15}{section.6.5}%
+\contentsline {section}{\numberline {6.6}困难、负结果与路线收敛}{15}{section.6.6}%
+\contentsline {section}{\numberline {6.7}当前尚未解决的瓶颈}{16}{section.6.7}%
+\contentsline {chapter}{\numberline {第7章\hspace {.3em}}后续路线与风险}{17}{chapter.7}%
+\contentsline {section}{\numberline {7.1}优先级路线}{17}{section.7.1}%
+\contentsline {section}{\numberline {7.2}主要风险与缓解}{17}{section.7.2}%
+\contentsline {chapter}{\numberline {第8章\hspace {.3em}}复现、构建与证据索引}{18}{chapter.8}%
+\contentsline {section}{\numberline {8.1}构建与 smoke test}{18}{section.8.1}%
+\contentsline {section}{\numberline {8.2}Round 28 当前基线同口径复现}{18}{section.8.2}%
+\contentsline {section}{\numberline {8.3}关键证据文件}{18}{section.8.3}%
+\contentsline {section}{\numberline {8.4}可调参数速查}{20}{section.8.4}%
+\contentsline {chapter}{\numberline {第9章\hspace {.3em}}总结}{21}{chapter.9}%
