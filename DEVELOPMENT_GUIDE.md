@@ -22,15 +22,66 @@
 
 ## 2. 当前开发环境
 
-本机是 macOS ARM，主要用于编辑代码。目标开发和验证环境在 openEuler 虚拟机内。
+本机是 macOS ARM，主要用于编辑代码。目标开发和验证环境在 openEuler 机器内。
 
-虚拟机信息：
+### 2.1 性能测量首选平台：aarch64 云桌面（Round 15 起）
 
-```bash
-ssh root@192.168.8.131
+这是目前**最接近官方性能平台**的机器：同 ISA、同 OS、同编译器版本。任何要写进
+`docs/performance.md` 的数字都应该在这里测。
+
+```text
+HiSilicon aarch64（SVE / i8mm / bf16），openEuler 22.03 LTS，kernel 5.10
+40 核 / 单 NUMA 节点 / 2.9 GHz 定频（boost disabled）/ L3 32 MiB
+BiSheng Enterprise 3.2.0.1.B004 clang 15.0.4，装在 /opt/bisheng
+项目目录 /root/bisheng
 ```
 
-已配置免密登录，当前可用：
+经 tailscale 隧道接入（节点名 `bisheng-cg-aarch64`）。主机地址放在**未跟踪**的
+`scripts/cg_host.env`（照 `scripts/cg_host.env.example` 填），因为本仓库是公开镜像。
+
+```bash
+./scripts/cg.sh 'nproc'                 # 跑一条命令（ssh 多路复用）
+./scripts/sync_to_cg.sh                 # 同步工作树到 /root/bisheng
+./scripts/cg_run.sh <job> '<command>'   # detach 跑长作业，掉线不丢
+./scripts/cg_run.sh --tail <job>        # 看进度
+```
+
+长作业一律用 `cg_run.sh`：链路是 relay 中转的 tailscale，实测会掉线，`setsid nohup`
+能让作业活下来。
+
+**两个必须知道的环境约束：**
+
+1. **2 GiB 内存 cgroup 硬上限。** `free` 显示的 77 GB 是宿主视图；真实上限在
+   `/sys/fs/cgroup/memory/memory.limit_in_bytes`，只读改不了。per-case harness 按官方
+   `matrix_case_io` 约定要同时驻留 150 个用例的输入和输出（2.46 GB），会被 OOM killer
+   打掉（exit 137）。跑全量用 `scripts/percase_bench_chunked.sh`，它切成 ≤600 MB 的 5 段
+   再合并打分。
+2. **这台机器是从零装起来的**，如果换了新容器需要重做：
+
+```bash
+dnf install -y rsync numactl perf gcc-c++ libstdc++-devel libstdc++-static
+curl -L -o /root/dl/bisheng.tar.gz \
+  https://mirrors.huaweicloud.com/kunpeng/archive/compiler/bisheng_compiler/BiShengCompiler-3.2.0.1-aarch64-linux.tar.gz
+# sha256 14a71269725d871ae3e0fe4345953dcb0c090f8e37a832a59fd3c13d7d7ca236
+tar -xzf /root/dl/bisheng.tar.gz -C /opt && mv /opt/BiShengCompiler-3.2.0.1-aarch64-linux /opt/bisheng
+cat > /etc/profile.d/bisheng.sh <<'EOF'
+export BISHENG_HOME=/opt/bisheng
+export PATH="${BISHENG_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${BISHENG_HOME}/lib:${LD_LIBRARY_PATH:-}"
+EOF
+```
+
+`libstdc++-devel` 不能省：毕昇 clang++ 用系统 libstdc++，缺了它 CMake 在
+`Check for working CXX compiler` 就报 `cannot find -lstdc++`。
+
+### 2.2 x86_64 Xeon 调试机（对照，非性能平台）
+
+40 物理核 Xeon Gold 5218R ×2 / Ubuntu 22.04 / LLVM 17，入口 `scripts/xeon.sh`。
+Round 8–14 的全部调优常量都在这台机器上标定。**Round 15 已证明其中至少 range chunk
+预算是平台专属拟合**（那台机器上串行基准慢 1.8 倍，于是"每 task 多少 flops"整条标定失效），
+所以这台机器只适合做结构性实验和同机相对比较，不能用来定常量。
+
+### 2.3 旧 4 vCPU 虚拟机（已不可达）
 
 ```bash
 ssh -i ~/.ssh/bisheng_vm_ed25519 root@192.168.8.131

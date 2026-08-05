@@ -18,3 +18,5 @@ contestant_sdk/bin/
 contestant_sdk/lib/
 
 scripts/xeon_host.env
+
+scripts/cg_host.env
