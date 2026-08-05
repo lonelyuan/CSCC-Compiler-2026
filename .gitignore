@@ -21,3 +21,4 @@ contestant_sdk/lib/
 /tools/sched_harness/sched_bench
 /tools/sched_harness/sched_bench_tsan
 /tools/sched_harness/*.dSYM/
+scripts/xeon_host.env
