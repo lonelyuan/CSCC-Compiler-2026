@@ -1,9 +1,9 @@
 # 后续优化路线
 
-> **2026-08-05 Round 27 起,先读本节,再读 Round 15 和其余历史。** Round 15 的结构上限
+> **2026-08-05 当前 main/HEAD 校准后,先读本节,再读 Round 15 和其余历史。** Round 15 的结构上限
 > 仍是正确的零开销上界,但“做到上限 80%”不能再当作已证明可达:无锁执行和二维复用落地后,
 > `b=8` 已在 32 核进入带宽平台,小矩阵则被每 panel 固定延迟主导。相位屏障仍不是首要结构瓶颈,
-> 但当前 panel-local 设计在这台机器上的**实测**结果是 7.386x / 53.85 分,不是 12.11x。
+> 但当前 panel-local 设计在这台机器上的**实测**结果是 7.3865x / 53.85 分,不是 12.11x。
 
 ## 当前最高优先级：跨过带宽与固定延迟，而不是继续换队列/屏障（Round 17–27）
 
@@ -16,14 +16,26 @@
 3. Pass 把每 panel 的 TRSM 行循环改写成一次 range submit；每行仍直接调用官方 `trsm`，但不再
    由单一提交线程逐行分配 context 和提交 task，降低小 tile 的每 panel 固定延迟。
 
-五段全量命令:
+当前主线 `5394c43` 已重新跑过五段全量基线:
+
+```bash
+LABEL=r28_head5394c43_cg_baseline PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+```
+
+150/150 verifier PASS，证据为
+`docs/benchmark_results/r28_head5394c43_cg_baseline.csv`（以及 `_c1`–`_c5`），
+geomean **7.386502x**、总分 **53.85**。这证明合并后的当前 HEAD 可以借用
+Round 27 的性能级别作为基线，但没有带来新的性能提升。
+
+历史 Round 27 全量命令:
 
 ```bash
 COMPILER2026_TRSM_RANGE=1 LABEL=r27_cg_trsm_range PASSES=3 REPEAT=1 \
   ./scripts/percase_bench_chunked.sh
 ```
 
-150/150 verifier PASS，证据
+同样 150/150 verifier PASS，证据
 `docs/benchmark_results/r27_cg_trsm_range.csv`（以及 `_c1`–`_c5`）:
 
 | 版本 | geomean | 总分 |
@@ -32,15 +44,16 @@ COMPILER2026_TRSM_RANGE=1 LABEL=r27_cg_trsm_range PASSES=3 REPEAT=1 \
 | Round 17 持久无锁 phase | 6.123x | 51.48 |
 | Round 20 + 二维 tiling | 7.006x | 53.14 |
 | **Round 27 + TRSM range outlining** | **7.386x** | **53.85** |
+| **Current HEAD 5394c43 calibration** | **7.3865x** | **53.85** |
 
-Round 27 分桶:
+当前 HEAD 分桶:
 
 | 桶 | 用例数 | 实测 | Round 15 零开销上限 | 达成率 |
 | --- | ---: | ---: | ---: | ---: |
-| `b < 12` | 22 | 7.83x | 36.6x | 21.4% |
-| `12 <= b < 32` | 39 | 9.74x | 30.6x | 31.8% |
-| `32 <= b < 128` | 61 | 8.13x | 12.9x | 63.0% |
-| `b >= 128` | 28 | 3.90x | 4.1x | 95.0% |
+| `b < 12` | 22 | 7.76x | 36.6x | 21.2% |
+| `12 <= b < 32` | 39 | 9.75x | 30.6x | 31.9% |
+| `32 <= b < 128` | 61 | 8.18x | 12.9x | 63.4% |
+| `b >= 128` | 28 | 3.87x | 4.1x | 94.4% |
 
 TRSM range 的 20 点同轮开/关配对对照成立:`b<12` 为 **1.1400x**、`12<=b<32` 为
 **1.0800x**，而机制控制组 `b>=32` 为 **1.0019x**；全组为 **1.0544x**。全量相对 Round 20

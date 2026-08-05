@@ -2891,3 +2891,73 @@ AArch64 远端先完成 submission clean build，再运行：
 WS 的性能方向与历史结论一致，因此仍默认关闭。证据：
 `merge_all_branches_smoke.log`、`merge_all_branches_smoke.done`。本节只证明合并兼容性；
 合并 commit 没有重新跑 150-case 全量，所以不借用 Round 27 的 `53.85` 作为该 commit 的新成绩。
+
+## 2026-08-05 当前 main/HEAD AArch64 全量基线校准
+
+### 目的
+
+上一节的 merge commit `5394c43` 只做了 smoke，不能把 Round 27 的全量成绩直接借给当前
+HEAD。本轮把干净本地 `main` 同步到 CourseGrading AArch64 cloud desktop，重建并重跑
+150 个公开用例的等权 per-case 基线，作为后续 `/goal` 持续迭代的唯一当前基线。
+
+### 环境与源码状态
+
+- 本地源: `5394c43555b6f5876e52f4b050e7a2bc8d8d09ee`，`git status --short` 为空。
+- 远端元数据: `/mnt/cgshare/bisheng/.evaluation/source-state.env` 记录
+  `source_commit=5394c43555b6f5876e52f4b050e7a2bc8d8d09ee`、`source_dirty=0`。
+- 平台: openEuler 22.03 AArch64，HiSilicon 40 核，单 NUMA，2.9 GHz 定频，BiSheng
+  Enterprise 3.2.0.1.B004 clang 15.0.4。
+- clean build 通过，Pass/runtime 产物位于
+  `/mnt/cgshare/bisheng/build/submission_bisheng/`。
+
+### 正确性 smoke
+
+远端同步后先跑 `SPEC_START=91 SPEC_END=104 COMPILER2026_DAG_THREADS=40`:
+
+- 默认路径: verifier PASS，`speedup=2.890x`。
+- `COMPILER2026_DAG_WORK_STEALING=1`: verifier PASS，`speedup=2.650x`。
+
+WS 路径仍慢于默认路径，因此继续默认关闭。
+
+### 五段全量基线
+
+命令:
+
+```bash
+LABEL=r28_head5394c43_cg_baseline PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+```
+
+五段均通过 verifier，合并为 **150/150 PASS**。IR 断言每段一致:
+`ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4`。
+
+结果:
+
+| 指标 | 数值 |
+| --- | ---: |
+| per-case geomean | **7.386502x** |
+| total-time ratio | 11.660466x |
+| total score (`m_ideal=32`) | **53.85** |
+
+分桶:
+
+| 桶 | 用例数 | geomean |
+| --- | ---: | ---: |
+| `b < 12` | 22 | 7.755x |
+| `12 <= b < 32` | 39 | 9.748x |
+| `32 <= b < 128` | 61 | 8.176x |
+| `b >= 128` | 28 | 3.872x |
+
+证据已复制回本地:
+
+- `docs/benchmark_results/r28_head5394c43_cg_baseline.csv`
+- `docs/benchmark_results/r28_head5394c43_cg_baseline_c1.csv` 到 `_c5.csv`
+- 远端完整日志复制为 `docs/benchmark_results/r28_head5394c43_baseline.log`（若未跟踪，
+  CSV 仍是正式性能证据）。
+
+### 结论
+
+当前 HEAD 已经重新校准到 Round 27 同一性能级别，后续可以把 **7.3865x / 53.85 分**
+作为当前基线。到第一名 `63` 分需要 geomean `12.2667x`，仍需全量 **1.66x**。
+到 60 分需要 `10.667x`，仍需 **1.44x**。下一步不要再投入 work stealing 或 barrier
+替换，优先做能覆盖 `12<=b<128` 的中小 tile 执行效率和固定延迟实验。
