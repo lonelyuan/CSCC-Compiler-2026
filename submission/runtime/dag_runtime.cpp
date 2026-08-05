@@ -402,16 +402,52 @@ public:
     }
 
     std::size_t rangeChunkLength(std::size_t count) const {
-    // 50000 flops per task, i.e. about 5us of work at this host's madd throughput.
-    // Swept 6000/12500/25000/50000/100000/200000/400000/800000 at 16/24/40
-    // participants, 3 repeats per point, on n=1152 with b from 8 to 128. At the
-    // default 24 participants 50000 beat 200000 on b=8 (3.94x vs 3.63x), b=12
-    // (6.12x vs 5.96x), b=16 (7.80x vs 7.52x), b=24 (9.84x vs 9.07x) and b=32
-    // (11.46x vs 11.09x), tied at b=64 and lost slightly at b=128 (7.65x vs
-    // 7.95x). Going below 50000 turns over: at 6000 the small tiles collapse
-    // (b=8 3.35x, b=12 4.30x) because the chunk stops covering the queue round
-    // trip it costs.
-        std::size_t target_flops = 50000;
+    // 200000 flops per task. This is the aarch64 value, i.e. the target platform's:
+    // the judge runs on Kunpeng/aarch64, so the constant is fitted there and the
+    // x86_64 Xeon debug host is now the one that is off-optimum.
+    //
+    // History, because this constant has moved twice for the same underlying
+    // reason. The budget targets a WALL-CLOCK quantity ("about 5us of work per
+    // task") but expresses it as a PLATFORM-DEPENDENT proxy (flops), so it has to
+    // be refitted per platform. Round 14 measured 50000 on the Xeon host: at 24
+    // participants it beat 200000 on b=8 (3.94x vs 3.63x), b=12 (6.12x vs 5.96x),
+    // b=16 (7.80x vs 7.52x), b=24 (9.84x vs 9.07x) and b=32 (11.46x vs 11.09x).
+    // Round 15 then measured a 40-core 2.9 GHz HiSilicon aarch64 host, where the
+    // serial reference runs in 0.55x the Xeon time -- the official madd vectorises
+    // well on a core with no AVX-style frequency offset -- so 50000 flops buys only
+    // ~2.75us there and stops covering the queue round trip it costs. Same sweep
+    // shape, opposite answer (n=1152, repeat=3, every point verifier-checked,
+    // docs/benchmark_results/r15_cg_range_flops_sweep.csv):
+    //
+    //   b      25000   50000  100000  200000  400000
+    //   8      2.70x   2.79x   2.84x   2.84x   2.82x
+    //   12     3.97x   4.22x   4.46x   4.48x   4.31x
+    //   16     5.05x   5.62x   6.01x   6.18x   6.18x
+    //   24     7.29x   7.23x   8.78x   9.25x   9.10x
+    //   32    10.81x  10.77x  10.85x  11.92x  11.50x
+    //   64    16.38x  16.59x  16.46x  16.48x  16.52x
+    //   128    9.37x   9.34x   9.36x   9.28x   9.30x
+    //
+    // Still an extremum, not a saturation: 6000 collapses the small tiles on the
+    // Xeon host and 400000 gives back part of the gain here, so both sides are
+    // worse and the value cannot be raised "just in case".
+    //
+    // The shift is 4x, not the 1.8x a pure throughput conversion predicts, so
+    // aarch64's per-task queue overhead is also higher in absolute terms; do not
+    // try to derive this constant from a flops/second ratio alone.
+    //
+    // Full-suite validation on aarch64 (150 cases, PASSES=3 REPEAT=1, 150/150
+    // verifier PASS): geomean 4.253x -> 4.370x, score 47.97 -> 48.19. That +2.7%
+    // is inside this host's 5.7-9.6% run-to-run noise, so it was confirmed the way
+    // docs/engineering_log.md requires instead -- by splitting the suite on whether
+    // the change CAN affect a case (whether the two budgets yield a different chunk
+    // length, which is b<=36 versus b>=40):
+    //   affected  80 cases: 3.383x -> 3.553x  (+5.0%)
+    //   control   70 cases: 5.524x -> 5.535x  (+0.2%)   <- no host drift
+    // and the effect is monotone in b (b=18 +13.5%, b=24 +23.9%, b=28 +16.2%).
+    // The b=8 group reads -2.5%, which is inside its documented +-10% code-layout
+    // noise and contradicted by the single-case sweep above (2.79x -> 2.84x).
+        std::size_t target_flops = 200000;
         if (const char *env = std::getenv("COMPILER2026_RANGE_TASK_FLOPS")) {
             char *end = nullptr;
             const unsigned long configured = std::strtoul(env, &end, 10);
@@ -1459,9 +1495,9 @@ thread_local std::unique_ptr<AsyncRuntime> runtime;
 // reproduces: 18->10, 24->16, 32->24, and no cap from b=48 up.
 //
 // PLATFORM CAVEAT: the constant encodes this host's lock throughput relative to
-// tile task duration. The aarch64 target has narrower vector units, so the same
-// b yields a longer task and a genuinely higher sustainable count; this default
-// therefore under-provisions there, costing throughput but never correctness.
+// tile task duration. Measured on aarch64 in Round 15: the serial reference runs
+// in 0.55x the Xeon time, so the same b yields a SHORTER task there and this
+// default over-provisions rather than under-provisions.
 // Re-measure with COMPILER2026_DAG_PARTICIPANT_CAP=off before trusting it as a
 // tuned value on a new platform.
 // Sustainable participant count for a b x b tile task.
@@ -1487,10 +1523,16 @@ thread_local std::unique_ptr<AsyncRuntime> runtime;
 // worth far more than that in portability: the constant no longer encodes this
 // host's lock throughput.
 //
-// PLATFORM CAVEAT: 12 and 20 are still this host's numbers. aarch64 has narrower
-// vector units, so each tile task runs longer and the sustainable count there is
-// at least as high -- the direction of the error is safe. Re-measure with
-// COMPILER2026_DAG_PARTICIPANT_CAP=off and scripts/participant_sweep.sh.
+// PLATFORM NOTE (measured, Round 15): 12 and 20 are this host's numbers. An
+// earlier version of this comment claimed aarch64 has narrower vector units, so
+// each tile task runs longer and the sustainable count there is "at least as
+// high -- the direction of the error is safe". That premise is WRONG. On a
+// 40-core 2.9 GHz HiSilicon aarch64 host the official madd vectorises well and
+// the serial reference takes only 0.55x the Xeon time, so a tile task is SHORTER
+// there, not longer, and per-task overhead weighs MORE. The measured cost is
+// visible in the b<32 buckets, which reach only 0.85-0.92x of their Xeon
+// speedups while b>=32 reaches 1.06-1.07x. Re-measure with
+// COMPILER2026_DAG_PARTICIPANT_CAP=off and scripts/knob_sweep.sh.
 std::size_t participantCapForTile(int b) {
     if (const char *env = std::getenv("COMPILER2026_DAG_PARTICIPANT_CAP")) {
         if (std::strcmp(env, "off") == 0 || std::strcmp(env, "none") == 0) {
@@ -1526,6 +1568,27 @@ std::size_t participantCapForTile(int b) {
     }
     return std::numeric_limits<std::size_t>::max();
 }
+
+// NEXT LEAD (Round 15, measured but NOT yet adopted): 24 was fitted at the old
+// 50000-flop chunk budget. Re-sweeping thread counts with the cap off at the new
+// 200000 budget moves most of the optima above it (n=1152, repeat=3, every point
+// verifier-checked, docs/benchmark_results/r15_cg_participant_sweep_200k.csv):
+//
+//   b      T=8     T=16    T=24    T=32    T=40    optimum   cap=24 costs
+//   8      3.34x   3.19x   3.10x   2.93x   2.76x   8         -7.2%
+//   12     3.99x   4.60x   4.59x   4.40x   4.32x   16        -0.2%
+//   16     4.88x   5.94x   6.25x   6.39x   6.23x   32        -2.2%
+//   24     6.06x   8.30x   9.52x   9.94x   9.74x   32        -4.2%
+//   32     6.36x   9.73x  11.47x  12.39x  12.21x   32        -7.4%
+//   64     6.65x  10.91x  13.55x  15.30x  16.24x   40        (uncapped)
+//
+// So the cap is simultaneously too HIGH at b=8 (which wants 8 and loses 7% at 24)
+// and too LOW from b=16 up (b=32 loses 7.4%). A monotone rule -- roughly 8 at b=8,
+// 16 at b=12, 32 for 16<=b<48, then the full pool -- fits all six points, but it is
+// derived from one matrix size, and the cap interacts with block count, so it needs
+// a sweep across n and a full-suite validation before it becomes the default.
+// Estimated worth if it holds: ~+5% on the ~50 cases with 12<=b<48, about +0.13
+// points.
 
 std::size_t resolveThreadCount(int n, int b) {
     std::size_t threads = std::thread::hardware_concurrency();
@@ -1602,9 +1665,16 @@ int asyncMinBlockSize() {
     //     3.76x-4.04x, b=12 reaches 1.65x, while b=9 (0.75x) and b=8 (0.54x)
     //     regress because per-task overhead exceeds the 2*b^3 flops a madd
     //     carries. The crossover therefore sits between 9 and 12.
-    // 12 is also the conservative direction for the aarch64 target: its
-    // narrower vector units make each tile task longer, so a threshold that
-    // pays off where tasks are shortest also pays off there.
+    // The aarch64 measurement in Round 15 contradicts what this comment used to
+    // claim ("narrower vector units make each tile task longer, so a threshold
+    // that pays off where tasks are shortest also pays off there"). Tile tasks
+    // are SHORTER on that host, not longer -- the serial reference runs in 0.55x
+    // the Xeon time -- so a threshold fitted here is if anything too permissive
+    // there. The five cases that lose most on aarch64 are exactly the small-b,
+    // small-n ones just above these bounds (n=320 b=8 at 0.490x, n=384 b=8 at
+    // 0.614x, n=448 b=8 at 0.760x), so the crossovers below want re-measuring.
+    // Rescuing all of them is worth only +0.14 points under the equal-weight
+    // geometric mean, though, so it is not where to start.
     // Was 12, when one task was one madd and a b=8 madd's 1024 flops could not pay
     // for a queue round trip. Range tasks group a whole k-loop at b=8 (the chunk
     // rule yields 195 madds per task there), and the same cases now measure
