@@ -27,6 +27,11 @@
 namespace {
 
 using TaskFn = void (*)(void *);
+// A range task runs a half-open sub-range of an index space that the Pass owns.
+// The runtime partitions [0, count) and never interprets the context or the
+// indices, so this stays a generic parallel-for rather than knowledge of what a
+// madd is.
+using RangeFn = void (*)(void *, int, int);
 constexpr std::size_t kMaxTaskBatch = 32;
 constexpr std::size_t kMaxProfiledTasks = 8;
 // Upper bound on how many dependency-aware submits the submitting thread may
@@ -97,6 +102,11 @@ class AsyncRuntime {
         std::uint64_t enqueue_ns;
         int dag_node = -1;
         std::uint8_t priority = 0;
+        // Set only for range tasks; fn is then null and [begin, end) is the
+        // sub-range this entry owns.
+        RangeFn range_fn = nullptr;
+        int begin = 0;
+        int end = 0;
     };
 
     struct BatchProfile {
@@ -348,6 +358,68 @@ public:
         }
 
         enqueueTask(task);
+    }
+
+    // Partition [0, count) and stage one task per chunk.
+    //
+    // Chunk length targets a constant amount of WORK per task rather than a
+    // constant number of indices, because the right granularity moves with b.
+    // Round 10's probe measured, at 40 threads, that b=8 needs one task per whole
+    // k-loop (3.81x fine against 9.60x coarse) while b=32 and above want one task
+    // per madd (17.99x fine against 11.43x coarse). Dividing a fixed flop budget
+    // by the 2*b^3 a single madd carries reproduces both ends and interpolates
+    // between them, so the Pass does not have to choose.
+    void submitRange(RangeFn fn, void *context, int count) {
+        if (count <= 0) {
+            return;
+        }
+        const std::size_t chunk = rangeChunkLength(static_cast<std::size_t>(count));
+        const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
+        for (int begin = 0; begin < count;) {
+            const int end =
+                std::min<int>(count, begin + static_cast<int>(chunk));
+            Task task{};
+            task.fn = nullptr;
+            task.context = context;
+            task.enqueue_ns = profiling ? nowNs() : 0;
+            task.range_fn = fn;
+            task.begin = begin;
+            task.end = end;
+            if (activeWorkerCount() == 0) {
+                BatchProfile profile = runBatch(&task, 1, profiling);
+                if (profiling) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    recordBatchProfileLocked(&task, 1, profile, false);
+                }
+            } else {
+                pending_tasks_[pending_count_++] = task;
+                if (pending_count_ >= submit_stage_size_) {
+                    flushPendingTasks();
+                }
+            }
+            begin = end;
+        }
+    }
+
+    std::size_t rangeChunkLength(std::size_t count) const {
+        std::size_t target_flops = 200000;
+        if (const char *env = std::getenv("COMPILER2026_RANGE_TASK_FLOPS")) {
+            char *end = nullptr;
+            const unsigned long configured = std::strtoul(env, &end, 10);
+            if (end != env && *end == '\0' && configured > 0) {
+                target_flops = static_cast<std::size_t>(configured);
+            }
+        }
+        if (b_ <= 0) {
+            return count;
+        }
+        const std::size_t tile = static_cast<std::size_t>(b_);
+        const std::size_t madd_flops = 2 * tile * tile * tile;
+        std::size_t chunk = (madd_flops == 0) ? count : target_flops / madd_flops;
+        if (chunk < 1) {
+            chunk = 1;
+        }
+        return std::min(chunk, count);
     }
 
     void submitWithDeps(TaskFn fn, void *context, const int *deps, std::size_t dep_count,
@@ -1060,7 +1132,11 @@ private:
                 profile.total_queue_ns += profile.task_queue_ns[i];
             }
             try {
-                batch[i].fn(batch[i].context);
+                if (batch[i].range_fn != nullptr) {
+                    batch[i].range_fn(batch[i].context, batch[i].begin, batch[i].end);
+                } else {
+                    batch[i].fn(batch[i].context);
+                }
             } catch (...) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!worker_error_) {
@@ -1149,7 +1225,12 @@ private:
             if (batch[i].priority > 0) {
                 ++profile_priority_tasks_;
             }
-            TaskProfile &task_profile = profileForTaskLocked(batch[i].fn);
+            // Range tasks carry no TaskFn; key them by the range function so the
+            // per-name profile lines still separate trsm from madd.
+            TaskProfile &task_profile = profileForTaskLocked(
+                batch[i].range_fn != nullptr
+                    ? reinterpret_cast<TaskFn>(batch[i].range_fn)
+                    : batch[i].fn);
             ++task_profile.count;
             task_profile.queue_ns += profile.task_queue_ns[i];
             task_profile.exec_ns += profile.task_exec_ns[i];
@@ -1412,11 +1493,27 @@ std::size_t participantCapForTile(int b) {
             return static_cast<std::size_t>(configured);
         }
     }
-    if (b <= 12) {
-        return 12;
-    }
-    if (b <= 16) {
-        return 20;
+    // Re-derived again after range tasks changed the granularity: a task is now a
+    // chunk of madds sized to a constant flop budget rather than one madd, so the
+    // sustainable participant count rose and stopped depending so sharply on b
+    // (cap off, repeat=3, every point verifier-checked):
+    //
+    //   n=1152 b=8    T=8 3.17x  T=16 3.32x  T=24 3.62x  T=40 2.26x
+    //   n=2048 b=8    T=8 5.88x  T=16 7.28x  T=24 7.05x  T=40 6.40x
+    //   n=1152 b=12   T=8 3.91x  T=16 5.15x  T=24 5.81x  T=40 5.41x
+    //   n=1152 b=16   T=8 4.76x  T=16 6.59x  T=24 7.50x  T=40 7.07x
+    //   n=1152 b=32   T=8 6.33x  T=16 10.27x T=24 11.52x T=40 8.84x
+    //   n=1792 b=32   T=8 6.87x  T=16 12.22x T=24 14.38x T=40 15.40x
+    //   n=1152 b=64   T=8 6.44x  T=16 10.69x T=24 12.76x T=40 14.35x
+    //   n=1152 b=128  T=8 5.47x  T=16 7.49x  T=24 8.19x  T=40 7.74x
+    //
+    // 24 is the optimum for everything below b=48, and above it the larger tiles
+    // sustain the full pool. The compromise costs at most ~7% on the two cases
+    // that straddle it (b=32 with 56 blocks wants 40, b=128 with 9 blocks wants
+    // 24), which is smaller than the spread of a single unrepeated measurement on
+    // this host.
+    if (b < 48) {
+        return 24;
     }
     return std::numeric_limits<std::size_t>::max();
 }
@@ -1441,6 +1538,30 @@ std::size_t resolveThreadCount(int n, int b) {
 
     const int block_count = n / b;
     if (block_count <= 1) {
+        return 1;
+    }
+
+    // Minimum work before parallelising at all. The fixed cost of a call is two
+    // barriers per panel, so 2*n/b barriers, plus the one-time worker pool
+    // construction that lands on whichever case runs first (about 3.4ms for 39
+    // threads). Measured crossovers on the 150 public cases:
+    //
+    //   n=128: every b lands between 0.86x and 1.18x -- nothing to win, and the
+    //          b=8 case read 0.089x purely because it was the first async case in
+    //          the process and paid for the whole pool.
+    //   n=192: b>=16 wins (1.03x to 1.70x) but b=8 loses at 0.58x.
+    //   b<12:  the crossover sits near n=320 (n=256 b=8 is 0.756x, n=320 b=8 is
+    //          0.972x, n=320 b=10 is 1.384x, n=384 b=8 is 1.189x).
+    //
+    // Keeping tiny cases serial also means the pool is built on the first case
+    // large enough for 3.4ms to be noise, instead of on a 327us one.
+    //
+    // PLATFORM CAVEAT: both bounds are this host's crossovers. On a machine with
+    // slower barriers or more cores they move up; re-measure rather than port.
+    if (n < 192) {
+        return 1;
+    }
+    if (b < 12 && n < 320) {
         return 1;
     }
 
@@ -1475,7 +1596,12 @@ int asyncMinBlockSize() {
     // 12 is also the conservative direction for the aarch64 target: its
     // narrower vector units make each tile task longer, so a threshold that
     // pays off where tasks are shortest also pays off there.
-    int threshold = 12;
+    // Was 12, when one task was one madd and a b=8 madd's 1024 flops could not pay
+    // for a queue round trip. Range tasks group a whole k-loop at b=8 (the chunk
+    // rule yields 195 madds per task there), and the same cases now measure
+    // 3.62x at n=1152 and 7.28x at n=2048 against 0.93x and 0.99x on the serial
+    // path, so the crossover has moved below the smallest b the suite uses.
+    int threshold = 8;
     if (const char *env = std::getenv("COMPILER2026_ASYNC_MIN_B")) {
         char *end = nullptr;
         const long configured = std::strtol(env, &end, 10);
@@ -1586,6 +1712,50 @@ std::size_t maxWorkerThreads() {
     return (threads > 1) ? (threads - 1) : 0;
 }
 
+// Build the pool at library load instead of inside the first timed call.
+//
+// The pool is a process-lifetime resource, but constructing it lazily charged its
+// entire cost -- about 3.4ms for 39 threads -- to whichever case happened to run
+// first. That is invisible on a large case and catastrophic on a small one, and it
+// moves around: with tiny cases routed to the serial path, the bill simply
+// relocated from n=128 b=8 (0.089x) to the next async case, n=192 b=16, which fell
+// from 1.53x to 0.31x. Creating the pool here makes the cost a one-time startup
+// expense outside every measured region, which is where thread-pool construction
+// belongs and how OpenMP runtimes behave.
+//
+// Lazy construction in compiler2026_runtime_begin is kept as the fallback, so if
+// this initializer never runs the behaviour is only slower, never wrong.
+void warmupTask(void *) {}
+
+struct PoolPrewarm {
+    PoolPrewarm() {
+        const std::size_t pool_threads = maxWorkerThreads();
+        if (pool_threads == 0) {
+            return;
+        }
+        runtime = std::make_unique<AsyncRuntime>(pool_threads);
+        // Creating the threads is only half the first-call cost. Measured on
+        // n=192 b=16, the case that inherited the bill once tiny cases went
+        // serial: 0.309x with lazy construction, 0.611x with the threads made at
+        // load, against 1.527x when some earlier case had already warmed
+        // everything. The rest is the arena's first 1MB chunk, the queue vectors'
+        // first allocation, and the first futex wakeup and stack page fault for
+        // every worker. Running one throwaway parallel region here pays all of it
+        // outside any measured region, so the charge stops relocating to whichever
+        // case happens to run first.
+        runtime->resetForCall(64, 16, 0, 0, pool_threads + 1, 0);
+        void *chunk = runtime->allocate(1);
+        (void)chunk;
+        for (std::size_t i = 0; i < pool_threads * 4; ++i) {
+            runtime->submit(&warmupTask, nullptr);
+        }
+        runtime->wait();
+        runtime->resetQueue(0, 1);
+    }
+};
+
+const PoolPrewarm pool_prewarm;
+
 extern "C" void compiler2026_runtime_begin(int n, int b) {
     const std::size_t total_threads = (b < asyncMinBlockSize()) ? 1 : resolveThreadCount(n, b);
     const std::size_t worker_threads = (total_threads > 1) ? (total_threads - 1) : 0;
@@ -1651,6 +1821,12 @@ extern "C" void *compiler2026_runtime_alloc(std::size_t size) {
 
 extern "C" void compiler2026_runtime_submit(TaskFn fn, void *context) {
     activeRuntime().submit(fn, context);
+}
+
+// Generic parallel-for over [0, count). The Pass owns what an index means; the
+// runtime only decides how to cut the range up.
+extern "C" void compiler2026_runtime_submit_range(RangeFn fn, void *context, int count) {
+    activeRuntime().submitRange(fn, context, count);
 }
 
 extern "C" void compiler2026_runtime_submit_deps(TaskFn fn, void *context,

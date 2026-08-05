@@ -25,6 +25,7 @@ namespace {
 constexpr const char *kBegin = "compiler2026_runtime_begin";
 constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
+constexpr const char *kSubmitRange = "compiler2026_runtime_submit_range";
 constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
 constexpr const char *kSubmitDeps3 = "compiler2026_runtime_submit_deps3";
 constexpr const char *kSubmitDeps3Priority =
@@ -42,6 +43,7 @@ struct RuntimeApi {
     llvm::FunctionCallee begin;
     llvm::FunctionCallee alloc;
     llvm::FunctionCallee submit;
+    llvm::FunctionCallee submit_range;
     llvm::FunctionCallee submit_deps;
     llvm::FunctionCallee submit_deps3;
     llvm::FunctionCallee submit_deps3_priority;
@@ -155,6 +157,7 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         declareVoidRuntime(module, kBegin, {int32_ty, int32_ty}),
         module.getOrInsertFunction(kAlloc, alloc_ty),
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
+        declareVoidRuntime(module, kSubmitRange, {ptr_ty, ptr_ty, int32_ty}),
         declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kSubmitDeps3,
                            {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty}),
@@ -620,6 +623,158 @@ bool callsHaveCoordinates(llvm::ArrayRef<llvm::CallBase *> calls,
     return true;
 }
 
+llvm::StructType *getMaddRangeContext(llvm::Module &module) {
+    llvm::LLVMContext &context = module.getContext();
+    if (llvm::StructType *existing =
+            llvm::StructType::getTypeByName(context, "compiler2026.madd_range_context")) {
+        return existing;
+    }
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::StructType *ty =
+        llvm::StructType::create(context, "compiler2026.madd_range_context");
+    ty->setBody({ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty});
+    return ty;
+}
+
+// Build the body of the madd range task:
+//
+//   void task(ctx, begin, end) {
+//     for (int t = begin; t < end; ++t)
+//       madd(A0 + t*b*n, B0, C0 + t*b*n, b, n);
+//   }
+//
+// The strides come from the operator's own argument pattern in the source loop,
+// madd(&L[k*n+i], &L[j*n+i], &L[k*n+j], b, n) with k stepping by b: the first and
+// third pointers advance by b*n doubles per step and the second is invariant. The
+// task therefore issues exactly the calls the original inner loop issued, with the
+// same arguments, in the same order -- only the grouping into tasks changes.
+llvm::Function *getMaddRangeTask(llvm::Module &module, llvm::StructType *range_ctx_ty) {
+    if (llvm::Function *existing = module.getFunction("compiler2026_task_madd_range")) {
+        return existing;
+    }
+
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::FunctionType *task_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                {ptr_ty, int32_ty, int32_ty}, false);
+    llvm::Function *task_fn = llvm::Function::Create(
+        task_ty, llvm::GlobalValue::InternalLinkage, "compiler2026_task_madd_range", module);
+    task_fn->addFnAttr("compiler2026.skip");
+
+    llvm::FunctionType *operator_ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+    llvm::FunctionCallee madd_fn = module.getOrInsertFunction("madd", operator_ty);
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", task_fn);
+    llvm::BasicBlock *loop = llvm::BasicBlock::Create(context, "loop", task_fn);
+    llvm::BasicBlock *exit = llvm::BasicBlock::Create(context, "exit", task_fn);
+
+    llvm::Argument *ctx_arg = task_fn->getArg(0);
+    llvm::Argument *begin_arg = task_fn->getArg(1);
+    llvm::Argument *end_arg = task_fn->getArg(2);
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *a0 =
+        builder.CreateLoad(ptr_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 0));
+    llvm::Value *b0 =
+        builder.CreateLoad(ptr_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 1));
+    llvm::Value *c0 =
+        builder.CreateLoad(ptr_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 2));
+    llvm::Value *tile =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 3));
+    llvm::Value *lda =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, range_ctx_ty, ctx_arg, 4));
+    // Stride between consecutive k blocks, in doubles: b*n.
+    llvm::Value *stride = builder.CreateSExt(builder.CreateMul(tile, lda),
+                                             builder.getInt64Ty());
+    builder.CreateCondBr(builder.CreateICmpSLT(begin_arg, end_arg), loop, exit);
+
+    builder.SetInsertPoint(loop);
+    llvm::PHINode *index = builder.CreatePHI(int32_ty, 2, "t");
+    index->addIncoming(begin_arg, entry);
+    llvm::Value *offset =
+        builder.CreateMul(builder.CreateSExt(index, builder.getInt64Ty()), stride);
+    llvm::Value *a_ptr = builder.CreateInBoundsGEP(builder.getDoubleTy(), a0, offset);
+    llvm::Value *c_ptr = builder.CreateInBoundsGEP(builder.getDoubleTy(), c0, offset);
+    builder.CreateCall(madd_fn, {a_ptr, b0, c_ptr, tile, lda});
+    llvm::Value *next = builder.CreateAdd(index, builder.getInt32(1));
+    index->addIncoming(next, loop);
+    builder.CreateCondBr(builder.CreateICmpSLT(next, end_arg), loop, exit);
+
+    builder.SetInsertPoint(exit);
+    builder.CreateRetVoid();
+    return task_fn;
+}
+
+// Replace the innermost madd loop with one range submit in its preheader.
+//
+// Only the madd call is erased, not the loop itself: with no side effects left the
+// -O2 run that follows deletes the empty loop, and if it does not, the cost is an
+// empty countdown rather than a miscompile. That keeps this transformation free of
+// CFG and PHI surgery.
+bool replaceMaddLoopWithRangeSubmit(llvm::CallBase *call, llvm::Loop *loop,
+                                    llvm::Value *matrix_l, llvm::Value *n, llvm::Value *b,
+                                    llvm::StructType *range_ctx_ty,
+                                    llvm::FunctionCallee alloc,
+                                    llvm::FunctionCallee submit_range,
+                                    llvm::Function *range_task) {
+    if (loop == nullptr || !loop->getSubLoops().empty()) {
+        return false;
+    }
+    llvm::BasicBlock *preheader = loop->getLoopPreheader();
+    if (preheader == nullptr) {
+        return false;
+    }
+    // B0 is madd's second argument, &L[j*n+i], which is invariant in k. It must be
+    // available in the preheader for the hoisted submit to use it.
+    llvm::Value *b0 = call->getArgOperand(1);
+    if (!loop->isLoopInvariant(b0)) {
+        return false;
+    }
+
+    llvm::Module *module = call->getModule();
+    llvm::IRBuilder<> builder(preheader->getTerminator());
+    llvm::Type *int64_ty = builder.getInt64Ty();
+
+    // Recover j and i from B0's offset into L, which the tile_dag.v1 annotation
+    // declares to be the row-major output matrix: B0 - L == j*n + i.
+    llvm::Value *offset = builder.CreateSub(builder.CreatePtrToInt(b0, int64_ty),
+                                            builder.CreatePtrToInt(matrix_l, int64_ty));
+    llvm::Value *elements = builder.CreateExactSDiv(
+        offset, llvm::ConstantInt::get(int64_ty, sizeof(double)));
+    llvm::Value *wide_n = builder.CreateSExt(n, int64_ty);
+    llvm::Value *wide_b = builder.CreateSExt(b, int64_ty);
+    llvm::Value *panel_row = builder.CreateSDiv(elements, wide_n);
+    // C0 = &L[j*n + j]; A0 = &L[j*n + i] == B0 at k == j.
+    llvm::Value *c0 = builder.CreateInBoundsGEP(
+        builder.getDoubleTy(), matrix_l,
+        builder.CreateAdd(builder.CreateMul(panel_row, wide_n), panel_row));
+    // The inner loop runs k = j, j+b, ... < n, so it has (n - j)/b iterations.
+    llvm::Value *count = builder.CreateTruncOrBitCast(
+        builder.CreateSDiv(builder.CreateSub(wide_n, panel_row), wide_b),
+        builder.getInt32Ty());
+
+    const llvm::DataLayout &layout = module->getDataLayout();
+    llvm::Type *size_ty =
+        llvm::IntegerType::get(module->getContext(), layout.getPointerSizeInBits());
+    llvm::Value *ctx = builder.CreateCall(
+        alloc, {llvm::ConstantInt::get(
+                   size_ty, layout.getTypeAllocSize(range_ctx_ty).getFixedValue())});
+    builder.CreateStore(b0, fieldPtr(builder, range_ctx_ty, ctx, 0));
+    builder.CreateStore(b0, fieldPtr(builder, range_ctx_ty, ctx, 1));
+    builder.CreateStore(c0, fieldPtr(builder, range_ctx_ty, ctx, 2));
+    builder.CreateStore(b, fieldPtr(builder, range_ctx_ty, ctx, 3));
+    builder.CreateStore(n, fieldPtr(builder, range_ctx_ty, ctx, 4));
+    builder.CreateCall(submit_range, {range_task, ctx, count});
+
+    call->eraseFromParent();
+    return true;
+}
+
 void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir,
                             bool has_tile_dag_annotation) {
     llvm::DominatorTree dominator_tree(async_fn);
@@ -775,11 +930,29 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
         }
 
+        // One range task per (panel, j) instead of one task per madd. This is
+        // what lets the runtime pick granularity from b: Round 10 measured b=8
+        // needing a whole k-loop per task (3.81x fine against 9.60x coarse at 40
+        // threads) and b=32+ wanting one madd per task, and a range submit
+        // expresses both. It also removes the per-madd context allocation and
+        // takes the submitting thread out of the critical path, which the
+        // n=1152 b=16 profile showed dominating.
+        llvm::StructType *range_ctx_ty = getMaddRangeContext(*async_fn.getParent());
+        llvm::Function *range_task = getMaddRangeTask(*async_fn.getParent(), range_ctx_ty);
+        entry_builder.CreateCall(runtime.register_task,
+                                 {range_task,
+                                  entry_builder.CreateGlobalStringPtr("madd_range")});
         for (llvm::CallBase *call : madd_calls) {
             llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
             llvm::Loop *sync_loop =
                 (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
             addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
+            if (has_tile_dag_annotation &&
+                replaceMaddLoopWithRangeSubmit(call, loop, matrix_l, n, b, range_ctx_ty,
+                                               runtime.alloc, runtime.submit_range,
+                                               range_task)) {
+                continue;
+            }
             replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
         }
     }
