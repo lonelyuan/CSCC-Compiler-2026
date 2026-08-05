@@ -744,14 +744,35 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             addLoopExitWaits(outer_loop, runtime.wait, wait_blocks);
         }
     } else {
+        // Panel-local schedule with a phase barrier between trsm and madd.
+        //
+        // The previous version expressed trsm -> madd as real dependency edges:
+        // trsm published an output key per block and each madd resolved two of
+        // them. Profiling n=1152 b=16 with the cap off showed what that costs.
+        // All 64752 tasks get a DAG node built by the single submitting thread,
+        // which pays two latest_producer_ hash lookups, a StagedSubmit, node
+        // creation and edge wiring per madd. Raising participants from 8 to 40
+        // then collapsed the dequeue batch from 5.61 tasks to 1.22 and drove
+        // worker_idle_ms from 57 to 2268: the workers drain the ready queue
+        // faster than one thread can build it, so every task degenerated into a
+        // full mutex round trip and the run got 3x SLOWER (0.0593s -> 0.1724s).
+        //
+        // A barrier after the trsm loop makes all of that bookkeeping redundant.
+        // Within a panel every trsm is independent (they all depend only on the
+        // cholesky the main thread just ran synchronously), and every madd writes
+        // a distinct block (k,j), so once all trsm of the panel have completed
+        // the madds are mutually independent too. Both phases can therefore use
+        // the plain no-dependency submit path, which stages into a local buffer
+        // and takes the mutex once per task_batch_size_ tasks.
+        //
+        // The cost is giving up trsm/madd overlap. A hand-written probe carrying
+        // exactly this barrier still beat the dependency-tracked runtime by
+        // 1.5x-9.7x on the same cases, so the overlap was worth less than the
+        // bookkeeping needed to express it.
         for (llvm::CallBase *call : trsm_calls) {
-            if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.trsm_task,
-                                                  n, b, {}, 0, SemanticPriority::none,
-                                                  semantic_base)) {
-                llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
-                addLoopExitWaits(loop, runtime.wait, wait_blocks);
-                replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
-            }
+            llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
+            addLoopExitWaits(loop, runtime.wait, wait_blocks);
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.trsm_task);
         }
 
         for (llvm::CallBase *call : madd_calls) {
@@ -759,13 +780,7 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
             llvm::Loop *sync_loop =
                 (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
             addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
-            // Panel-local scheduling waits before the next panel, so madd outputs
-            // have no downstream async consumers in the current DAG scope.
-            if (!replaceOperatorCallWithDagSubmit(call, runtime, task_ir, task_ir.madd_task,
-                                                  n, b, {0, 1}, kNoOutputKey,
-                                                  SemanticPriority::none, semantic_base)) {
-                replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
-            }
+            replaceOperatorCallWithTaskSubmit(call, runtime, task_ir, task_ir.madd_task);
         }
     }
 

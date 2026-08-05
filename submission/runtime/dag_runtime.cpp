@@ -161,10 +161,29 @@ public:
         for (std::size_t i = 0; i < worker_count; ++i) {
             workers_.emplace_back([this, i]() { workerLoop(i); });
         }
+        active_workers_ = worker_count;
     }
 
     std::size_t workerCount() const {
         return workers_.size();
+    }
+
+    // How many workers may take tasks for the CURRENT call, as opposed to how
+    // many exist. The pool is built once at the largest size any case will need
+    // and the surplus is parked, because tearing it down and rebuilding it per
+    // call is not affordable: the participant cap resolves to 20 for b<=16 and to
+    // the full thread count for b>=24, so walking the judge's 150 cases in one
+    // process alternates between the two. A rebuild of ~2.4ms is invisible on a
+    // large case and ruinous on a small one -- n=128 b=32 has a serial time of
+    // 446us and measured 0.159x when every change of b rebuilt the pool, against
+    // 0.485x before this round and 3.16x for the same shape when the pool is
+    // already warm.
+    std::size_t activeWorkerCount() const {
+        return std::min(active_workers_, workers_.size());
+    }
+
+    std::size_t activeParticipants() const {
+        return activeWorkerCount() + 1;
     }
 
     ~AsyncRuntime() {
@@ -174,6 +193,7 @@ public:
             stopping_ = true;
         }
         work_cv_.notify_all();
+        park_cv_.notify_all();
         for (auto &worker : workers_) {
             worker.join();
         }
@@ -184,6 +204,15 @@ public:
                       std::size_t max_live_window = 0) {
         wait();
         max_live_window_ = max_live_window;
+        {
+            // Safe to publish without holding mutex_ only because wait() above
+            // left every worker parked with no work outstanding.
+            std::lock_guard<std::mutex> lock(mutex_);
+            active_workers_ =
+                std::min(total_threads > 1 ? total_threads - 1 : 0, workers_.size());
+        }
+        // Wake anything this call promotes back into the active set.
+        park_cv_.notify_all();
         resetProfile(n, b, total_threads, task_batch_size);
         resetQueue(reserve_tasks, task_batch_size);
     }
@@ -238,6 +267,10 @@ public:
         pending_count_ = 0;
         task_batch_size_ = std::max<std::size_t>(
             1, std::min<std::size_t>(task_batch_size, kMaxTaskBatch));
+        submit_stage_size_ = chooseSubmitStageSize();
+        if (pending_tasks_.size() < submit_stage_size_) {
+            pending_tasks_.resize(submit_stage_size_);
+        }
         dag_staging_.clear();
         dag_next_node_index_ = 0;
         dag_staging_limit_ = chooseDagStagingLimit(reserve_tasks);
@@ -254,7 +287,7 @@ public:
         if (const std::size_t configured = dagSubmitBatchOverride()) {
             return std::min(configured, kMaxDagSubmitBatch);
         }
-        const std::size_t participants = workers_.size() + 1;
+        const std::size_t participants = activeParticipants();
         if (participants <= 1) {
             return 1;
         }
@@ -262,10 +295,42 @@ public:
         return std::max<std::size_t>(1, std::min(budget, kMaxDagSubmitBatch));
     }
 
+    // How many no-dependency submits to stage before publishing them under one
+    // lock. This is a SEPARATE knob from task_batch_size_, which bounds how many
+    // tasks a worker may take per dequeue and is limited to kMaxTaskBatch by the
+    // fixed-size stack array the dequeue path uses.
+    //
+    // Staging depth has to scale with the participant count, and getting this
+    // wrong is what made more cores slower. Profiling n=1152 b=16 with the
+    // dependency edges already removed: at 8 participants the staged flush of 16
+    // tasks let the queue build to an average ready width of 382 and each dequeue
+    // took 6.9 tasks. At 36 participants the same flush of 16 could never
+    // outnumber the waiting workers, so ready width averaged 15.8 and
+    // dequeue_batches equalled the task count exactly -- 1 task per lock
+    // acquisition, 64752 times -- with worker_idle_ms at 4317 against 38. It is
+    // also structural in chooseBatchCount, which returns 1 whenever available is
+    // below participants*2: a 16-task release can never clear that bar at 36
+    // participants.
+    //
+    // Staging participants*kStagePerParticipant means one release carries a real
+    // batch for every worker. The delay this adds before the first task becomes
+    // visible is bounded by the same count of submits, and a submit on this path
+    // is only a bump allocation plus a few stores now that no DAG node is built.
+    std::size_t chooseSubmitStageSize() const {
+        static constexpr std::size_t kStagePerParticipant = 8;
+        static constexpr std::size_t kMaxSubmitStage = 4096;
+        if (task_batch_size_ <= 1) {
+            return 1;
+        }
+        const std::size_t participants = activeParticipants();
+        const std::size_t staged = participants * kStagePerParticipant;
+        return std::max(task_batch_size_, std::min(staged, kMaxSubmitStage));
+    }
+
     void submit(TaskFn fn, void *context) {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         Task task{fn, context, profiling ? nowNs() : 0};
-        if (workers_.empty()) {
+        if (activeWorkerCount() == 0) {
             BatchProfile profile = runBatch(&task, 1, profiling);
             if (profiling) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -276,7 +341,7 @@ public:
 
         if (task_batch_size_ > 1) {
             pending_tasks_[pending_count_++] = task;
-            if (pending_count_ >= task_batch_size_) {
+            if (pending_count_ >= submit_stage_size_) {
                 flushPendingTasks();
             }
             return;
@@ -290,7 +355,7 @@ public:
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint8_t task_priority = static_cast<std::uint8_t>(
             critical_priority_enabled_ ? std::max(0, std::min(priority, 3)) : 0);
-        if (workers_.empty()) {
+        if (activeWorkerCount() == 0) {
             Task task{fn, context, profiling ? nowNs() : 0, -1, task_priority};
             BatchProfile profile = runBatch(&task, 1, profiling);
             if (profiling) {
@@ -480,7 +545,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             enqueueTaskLocked(task);
             const std::size_t ready = readyTaskCountLocked();
-            should_notify = ready <= workers_.size();
+            should_notify = ready <= activeWorkerCount();
         }
         if (should_notify) {
             work_cv_.notify_one();
@@ -513,7 +578,7 @@ public:
         if (count == 0) {
             return;
         }
-        if (count >= workers_.size()) {
+        if (count >= activeWorkerCount()) {
             work_cv_.notify_all();
             return;
         }
@@ -530,7 +595,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             recordWaitEntryLocked();
         }
-        if (workers_.empty()) {
+        if (activeWorkerCount() == 0) {
             recordWaitProfile(profiling, wait_enter_ns);
             return;
         }
@@ -600,7 +665,7 @@ public:
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
         flushPendingTasks();
-        if (workers_.empty()) {
+        if (activeWorkerCount() == 0) {
             recordWaitProfile(profiling, wait_enter_ns);
             return;
         }
@@ -718,12 +783,24 @@ private:
             const std::uint64_t wait_start_ns = profiling ? nowNs() : 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                work_cv_.wait(lock, [this]() { return stopping_ || hasReadyTasksLocked(); });
+                park_cv_.wait(lock, [this, worker_index]() {
+                    return stopping_ || worker_index < activeWorkerCount();
+                });
+                if (stopping_) {
+                    return;
+                }
+                work_cv_.wait(lock, [this, worker_index]() {
+                    return stopping_ || worker_index >= activeWorkerCount() ||
+                           hasReadyTasksLocked();
+                });
                 if (profiling) {
                     worker_idle_ns_ += nowNs() - wait_start_ns;
                 }
                 if (stopping_ && !hasReadyTasksLocked()) {
                     return;
+                }
+                if (worker_index >= activeWorkerCount()) {
+                    continue;  // demoted by a new call; go back to the park gate
                 }
                 batch_count = takeReadyTasksLocked(batch.data());
             }
@@ -924,7 +1001,7 @@ private:
     }
 
     void drainReadyTasksForLiveWindow() {
-        if (max_live_window_ == 0 || workers_.empty()) {
+        if (max_live_window_ == 0 || activeWorkerCount() == 0) {
             return;
         }
 
@@ -965,7 +1042,7 @@ private:
             return 1;
         }
 
-        const std::size_t participants = workers_.size() + 1;
+        const std::size_t participants = activeParticipants();
         if (available <= participants * 2) {
             return 1;
         }
@@ -1148,7 +1225,7 @@ private:
                      "main_wait_ms=%.3f wait_calls=%llu wait_ms=%.3f "
                      "wait_ready_sum=%llu wait_active_sum=%llu wait_dag_live_sum=%llu "
                      "max_wait_ready=%zu max_wait_active=%zu max_wait_dag_live=%zu\n",
-                     n_, b_, total_threads_, workers_.size(), configured_batch_size_,
+                     n_, b_, total_threads_, activeWorkerCount(), configured_batch_size_,
                      static_cast<unsigned long long>(total_tasks_),
                      static_cast<unsigned long long>(main_tasks_),
                      static_cast<unsigned long long>(worker_tasks_),
@@ -1202,9 +1279,11 @@ private:
     std::unordered_map<int, int> latest_producer_;
     std::unordered_set<int> profile_output_keys_;
     std::size_t pending_dag_tasks_ = 0;
-    std::array<Task, kMaxTaskBatch> pending_tasks_{};
+    std::vector<Task> pending_tasks_{};
+    std::size_t submit_stage_size_ = 1;
     std::size_t task_head_ = 0;
     std::array<std::size_t, 3> priority_task_heads_{};
+    std::size_t active_workers_ = 0;
     std::size_t pending_count_ = 0;
     std::size_t task_batch_size_ = 1;
     // Submitter-private staging for dependency-aware submits. Only the thread
@@ -1215,6 +1294,7 @@ private:
     std::size_t max_live_window_ = 0;
     std::mutex mutex_;
     std::condition_variable work_cv_;
+    std::condition_variable park_cv_;
     std::condition_variable done_cv_;
     std::vector<std::unique_ptr<unsigned char[]>> chunks_;
     std::size_t chunk_size_ = 0;
@@ -1294,6 +1374,33 @@ thread_local std::unique_ptr<AsyncRuntime> runtime;
 // therefore under-provisions there, costing throughput but never correctness.
 // Re-measure with COMPILER2026_DAG_PARTICIPANT_CAP=off before trusting it as a
 // tuned value on a new platform.
+// Sustainable participant count for a b x b tile task.
+//
+// Re-derived from scratch after the scheduling change that removed the per-madd
+// DAG node and made the submit staging depth scale with the participant count.
+// The previous version (4 for b<=12, else b-8) was fitted to a curve that turned
+// over sharply -- n=1152 b=16 peaked at 8 participants and fell to 1.15x by 40 --
+// but that turnover was the runtime starving its own workers, not a property of
+// the tile size. With the queue able to hold depth, the measured curves mostly
+// plateau instead of collapsing (cap off, 40 physical cores, repeat=3, every
+// point verifier-checked):
+//
+//   n=1152 b=12  T=4 2.16x  T=12 3.85x  T=20 3.05x  T=40 2.11x   -> still turns over
+//   n=1152 b=16  T=4 2.75x  T=12 5.81x  T=20 6.25x  T=40 4.74x   -> mild turnover
+//   n=1152 b=24  T=4 3.11x  T=16 8.71x  T=20 9.44x  T=40 9.13x   -> plateau
+//   n=1152 b=32  T=4 3.53x  T=16 10.70x T=20 11.54x T=40 11.49x  -> plateau
+//   n=1152 b=64  T=4 3.58x  T=16 10.59x T=24 10.63x T=40 10.57x  -> plateau
+//   n=1152 b=128 T=4 3.37x  T=12 5.71x  T=16 5.70x  T=40 5.71x   -> plateau
+//
+// So only b<=16 still needs a cap. For b>=24 running every available thread costs
+// at most 3.3% against that case's own optimum (b=24, 9.13x vs 9.44x) and is
+// worth far more than that in portability: the constant no longer encodes this
+// host's lock throughput.
+//
+// PLATFORM CAVEAT: 12 and 20 are still this host's numbers. aarch64 has narrower
+// vector units, so each tile task runs longer and the sustainable count there is
+// at least as high -- the direction of the error is safe. Re-measure with
+// COMPILER2026_DAG_PARTICIPANT_CAP=off and scripts/participant_sweep.sh.
 std::size_t participantCapForTile(int b) {
     if (const char *env = std::getenv("COMPILER2026_DAG_PARTICIPANT_CAP")) {
         if (std::strcmp(env, "off") == 0 || std::strcmp(env, "none") == 0) {
@@ -1306,9 +1413,12 @@ std::size_t participantCapForTile(int b) {
         }
     }
     if (b <= 12) {
-        return 4;
+        return 12;
     }
-    return static_cast<std::size_t>(b - 8);
+    if (b <= 16) {
+        return 20;
+    }
+    return std::numeric_limits<std::size_t>::max();
 }
 
 std::size_t resolveThreadCount(int n, int b) {
@@ -1333,27 +1443,24 @@ std::size_t resolveThreadCount(int n, int b) {
     if (block_count <= 1) {
         return 1;
     }
-    // Three interacting bounds, all fitted to the 11 measured per-case optima
-    // rather than to a single point:
-    //   * block count: the DAG never exposes more than that many panels.
-    //   * tile granularity: participantCapForTile(b), the shared queue's
-    //     sustainable participant count for a b x b task.
-    //   * average panel width: the panel index sweeps from block_count down to
-    //     1, so participants beyond about half the blocks sit idle for the
-    //     second half of the run. This is what separates b=32 B=32 (optimum 16)
-    //     from b=32 B=64 (optimum 24) -- the granularity bound alone predicts 24
-    //     for both and loses 14% on the former.
-    //   * a floor of min(block_count, 16) on the WIDTH bound only: for few
-    //     blocks the early panels still hold block_count*(block_count-1)/2
-    //     tasks, so half-width is too pessimistic there (b=64 B=16 wants 16, not
-    //     8). The floor must not lift the granularity bound: doing so gave
-    //     b=16 B=72 sixteen participants where 8 is optimal (3.76x vs 2.60x) and
-    //     cost 7% aggregate.
-    const std::size_t blocks = static_cast<std::size_t>(block_count);
-    const std::size_t width = std::max(std::min<std::size_t>(blocks, 16),
-                                       std::max<std::size_t>(1, blocks / 2));
-    const std::size_t shaped = std::min(participantCapForTile(b), width);
-    return std::max<std::size_t>(1, std::min(std::min<std::size_t>(threads, blocks), shaped));
+
+    // Both of the block-count-derived bounds that used to sit here are gone,
+    // each disproved by measurement rather than simplified away:
+    //
+    //   * min(threads, blocks): a panel holds up to blocks*(blocks-1)/2 madds, so
+    //     useful parallelism is not bounded by the panel count. n=1152 b=128 has
+    //     only 9 blocks yet improves from 5.45x at 8 participants to 5.71x at 12,
+    //     and n=640 b=64 (10 blocks) peaks at 16.
+    //   * the average-panel-width bound max(min(blocks,16), blocks/2): it predicts
+    //     18 for n=1152 b=32 where the measured optimum is 20, and it exists only
+    //     to explain a decline that no longer happens.
+    //
+    // Small cases do not need protecting from a large pool either: n=128 b=16
+    // (8 blocks) reaches 1.05x at 40 participants against 0.258x before this
+    // round, and n=256 b=32 goes to 3.16x. Leaving the count at the hardware
+    // thread count for every b>=24 case also stops the worker pool from being
+    // torn down and rebuilt as the judge walks between cases with different b.
+    return std::max<std::size_t>(1, std::min(threads, participantCapForTile(b)));
 }
 
 int asyncMinBlockSize() {
@@ -1461,17 +1568,36 @@ AsyncRuntime &activeRuntime() {
 
 }  // namespace
 
+// Largest worker pool any case in this process can ask for. Sizing the pool to
+// this once, and letting resetForCall park the surplus, is what keeps a change of
+// b from costing a pool rebuild.
+std::size_t maxWorkerThreads() {
+    std::size_t threads = std::thread::hardware_concurrency();
+    if (threads == 0) {
+        threads = 1;
+    }
+    if (const char *env = std::getenv("COMPILER2026_DAG_THREADS")) {
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && configured > 0) {
+            threads = static_cast<std::size_t>(configured);
+        }
+    }
+    return (threads > 1) ? (threads - 1) : 0;
+}
+
 extern "C" void compiler2026_runtime_begin(int n, int b) {
     const std::size_t total_threads = (b < asyncMinBlockSize()) ? 1 : resolveThreadCount(n, b);
     const std::size_t worker_threads = (total_threads > 1) ? (total_threads - 1) : 0;
     const std::size_t reserve_tasks = reserveTaskCount(n, b);
     const std::size_t task_batch_size = selectTaskBatchSize(n, b, worker_threads);
     const std::size_t max_live_window = dagMaxLiveWindow();
-    if (!runtime || runtime->workerCount() != worker_threads) {
-        runtime = std::make_unique<AsyncRuntime>(worker_threads);
-        runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads,
-                              max_live_window);
-        return;
+    // Grow the pool but never shrink it: this call may want 20 participants and
+    // the next 40, and a teardown/rebuild between them costs about 2.4ms, which
+    // is larger than the entire serial time of the smallest cases.
+    const std::size_t pool_threads = std::max(worker_threads, maxWorkerThreads());
+    if (!runtime || runtime->workerCount() < pool_threads) {
+        runtime = std::make_unique<AsyncRuntime>(pool_threads);
     }
     runtime->resetForCall(reserve_tasks, task_batch_size, n, b, total_threads,
                           max_live_window);

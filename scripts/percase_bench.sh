@@ -91,14 +91,26 @@ echo "[2/6] running pass on block_cholesky"
 
 "${LLVM_DIS_BIN}" "${WORK_DIR}/ir/block_cholesky.opt.bc" -o "${WORK_DIR}/ir/block_cholesky.opt.ll"
 IR_LL="${WORK_DIR}/ir/block_cholesky.opt.ll"
+# The default path submits without dependency keys (phase barrier between trsm and
+# madd), while the opt-in cross-panel paths use submit_deps*. Count both and assert
+# on the total, so this check keeps working either way.
+IR_SUBMIT_PLAIN=$(grep -Ec "call void @compiler2026_runtime_submit\(" "${IR_LL}" || true)
 IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps3?(_priority)?\(" "${IR_LL}" || true)
+IR_SUBMITS=$((IR_SUBMIT_PLAIN + IR_SUBMIT_DEPS))
 IR_WAIT_CALLS=$(grep -Ec "call void @compiler2026_runtime_wait\(" "${IR_LL}" || true)
 IR_TRSM_CALLS=$(grep -Ec "call .*@trsm\(" "${IR_LL}" || true)
 IR_MADD_CALLS=$(grep -Ec "call .*@madd\(" "${IR_LL}" || true)
-echo "      ir_submit_deps=${IR_SUBMIT_DEPS} ir_wait_calls=${IR_WAIT_CALLS}" \
+echo "      ir_submits=${IR_SUBMITS} (plain=${IR_SUBMIT_PLAIN} deps=${IR_SUBMIT_DEPS})" \
+     "ir_wait_calls=${IR_WAIT_CALLS}" \
      "ir_trsm_calls=${IR_TRSM_CALLS} ir_madd_calls=${IR_MADD_CALLS}"
-if [[ "${IR_SUBMIT_DEPS}" -eq 0 || "${IR_TRSM_CALLS}" -eq 0 || "${IR_MADD_CALLS}" -eq 0 ]]; then
+if [[ "${IR_SUBMITS}" -eq 0 || "${IR_TRSM_CALLS}" -eq 0 || "${IR_MADD_CALLS}" -eq 0 ]]; then
   echo "percase_bench: pass did not transform block_cholesky" >&2
+  exit 3
+fi
+# Two barriers per panel are expected on the default path: one after the trsm loop
+# and one at the end of the madd nest. Zero waits would mean madd can race trsm.
+if [[ "${IR_WAIT_CALLS}" -eq 0 ]]; then
+  echo "percase_bench: no runtime_wait in transformed IR -- madd could race trsm" >&2
   exit 3
 fi
 
