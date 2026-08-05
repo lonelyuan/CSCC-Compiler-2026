@@ -189,14 +189,77 @@ Use the following order for a cloud calibration run:
 
 ## Submission/Judge Workflow
 
+### Automatic deliverable trigger
+
+Treat the user's Chinese or English request for `打包`, `可交付物`, `提交包`,
+`package`, `deliverable`, or `release artifact` as authorization to prepare the
+latest verified local deliverable. Do not stop after running `package.sh`, and do
+not present the generic `dist/submission.zip` as the file to upload.
+
+The delivered archive must use this form:
+
+```text
+submission-r<round>-<short_commit>-score<verified_score>.zip
+```
+
+For example:
+
+```text
+submission-r20-a1b2c3d-score53.14.zip
+```
+
+`dist/submission.zip` is only an intermediate output of `package.sh`. Copy the
+verified archive to the versioned name, report its absolute local path and
+SHA-256, and explicitly tell the user which file to upload. If no full benchmark
+score exists for the exact commit, use `score-unverified` instead of borrowing a
+score from another source state.
+
+Before producing a deliverable:
+
+1. Resolve the exact source worktree and reject ambiguity between `main`, Orca
+   worktrees, remote rsync mirrors, and stale `dist/` files.
+2. Require the release source to be a clean Git commit. Never describe a dirty
+   worktree or Git-less remote mirror using only the previous commit ID.
+3. Verify that the archived Pass/runtime source hashes match the validated source
+   snapshot.
+4. Require verifier evidence for that commit and attach the corresponding CSV/log
+   path. A performance score without full correctness is not releasable.
+5. Build the source-only archive in the target AArch64 environment, check that
+   `CMakeLists.txt` is at archive root, and rebuild it from a clean extraction.
+6. Keep old versioned deliverables; never silently overwrite the artifact the user
+   may already have submitted.
+
+### Optimization goal completion discipline
+
+For an optimization goal, treat every retained, evidence-backed optimization as
+a milestone. Before moving on from that milestone:
+
+- commit the accepted code change on its owning branch;
+- update `docs/engineering_log.md` with the mechanism, reproducible command,
+  correctness result, and measured outcome;
+- archive material CSV/log evidence under `docs/benchmark_results/` when it is a
+  performance claim;
+- revert failed or neutral experiment code, while recording the negative result
+  when it changes roadmap decisions;
+- keep one explicitly identified `latest verified deliverable` from the newest
+  fully verified commit.
+
+Do not mark an optimization goal complete while accepted code remains only as an
+uncommitted diff or while the newest uploadable ZIP still comes from an older
+commit. A micro-tweak does not need its own release package, but every retained
+milestone must be committed and documented; refresh the deliverable after the
+next full verifier/benchmark gate or whenever the user asks for packaging.
+
 When preparing a submission:
 
-1. Check and sync to the AArch64 cloud desktop.
-2. Build.
-3. Run smoke test with verifier.
-4. Run a benchmark label and archive CSV under `docs/benchmark_results/` when the result matters.
-5. Package.
-6. Verify zip layout in a clean directory on the cloud desktop:
+1. Check the owning worktree, commit the accepted code/docs/evidence, and record
+   the exact clean commit.
+2. Sync that exact commit to the AArch64 cloud desktop.
+3. Build.
+4. Run smoke test with verifier.
+5. Run a benchmark label and archive CSV under `docs/benchmark_results/` when the result matters.
+6. Package.
+7. Verify zip layout in a clean directory on the cloud desktop:
 
 ```bash
 rm -rf /tmp/judge_zip_test
@@ -210,7 +273,8 @@ cmake -S /tmp/judge_zip_test/submission -B /tmp/judge_zip_test/build -G Ninja \
 cmake --build /tmp/judge_zip_test/build -j"$(nproc)"
 ```
 
-7. Commit code/docs changes.
+8. Copy the verified ZIP back locally using the versioned deliverable name, check
+   its source hashes, compute SHA-256, and report the exact upload path.
 
 For an authorized online upload, switch to the repository's
 `contest-submission` skill. Keep formal judge submission separate from the

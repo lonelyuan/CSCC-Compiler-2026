@@ -555,6 +555,48 @@ src/baseline/block_cholesky.cpp
 
 去掉标注后必须与官方 baseline 完全一致。
 
+### 14.1 可交付物与版本命名协议
+
+`dist/submission.zip` 只是 `submission/scripts/package.sh` 的中间输出，**禁止把它作为
+最终交付文件名**。它没有携带 round、源码版本或验证分数，多个工作树/Agent 并行时极易把
+旧包误当成最新包。
+
+对外提交的 ZIP 必须使用：
+
+```text
+submission-r<round>-<short_commit>-score<verified_score>.zip
+```
+
+例如：
+
+```text
+submission-r20-a1b2c3d-score53.14.zip
+```
+
+若该 commit 尚无全量分数，只能写 `score-unverified`，不能借用其他 commit 或 dirty
+worktree 的结果。每个交付物必须同时能回答：
+
+- 来自哪个干净 Git commit；
+- verifier 是否全 PASS；
+- 分数对应哪份 CSV 和复现命令；
+- ZIP 的 SHA-256 是什么；
+- 解压后根目录是否直接包含 `CMakeLists.txt`，并且能否在干净目录重新构建。
+
+当用户说“打包”“可交付物”“提交包”“package”或“deliverable”时，项目助手应自动执行
+完整发布流程，而不是只运行 `package.sh`：
+
+1. 分清 `main`、Orca worktree、远端 rsync 镜像和历史 `dist/`，锁定唯一源码状态。
+2. 将已采纳的代码、`docs/engineering_log.md` 和性能证据提交；发布源码必须是干净 commit。
+3. 同步该 commit，在 aarch64 环境运行 verifier 和对应 benchmark。
+4. 从同一源码打 source-only 包，干净解压并用目标工具链重新构建。
+5. 把包复制回本地并改成版本化文件名，输出绝对路径和 SHA-256，明确指出应上传哪个文件。
+
+优化 goal 以“里程碑”管理：每个被保留的优化都要 commit 并记录机制、命令、CSV、正确性
+和结果；失败或中性实验应回退代码，但在会改变路线判断时记录否证结论。微小试验不要求每次
+都打包，但每经过一次全量 verifier/benchmark 门禁，或用户主动要求可交付物时，必须刷新
+`latest verified deliverable`。仍有已采纳代码只存在于未提交 diff，或者最新 ZIP 仍对应旧
+commit 时，不得宣告优化 goal 完成。
+
 ## 15. 常见问题
 
 ### 预编译工具不能运行
@@ -651,4 +693,3 @@ rsync -az --delete \
   /Users/chenzhongyuan/Documents/bisheng/ \
   root@192.168.8.131:/root/bisheng/
 ```
-
