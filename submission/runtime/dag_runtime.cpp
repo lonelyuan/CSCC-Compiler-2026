@@ -63,6 +63,38 @@ bool criticalPriorityEnabledFromEnv() {
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
+bool fastPhaseEnabledForTile(int b) {
+    if (const char *env = std::getenv("COMPILER2026_DAG_FAST_PHASE")) {
+        return env[0] != '\0' && env[0] != '0';
+    }
+    // The lock-free phase path removes the dominant fine-tile handoff cost.
+    // b>=128 was already at 96% of the panel-barrier structural ceiling and the
+    // Round 17 A/B measured a small regression there, so leave it on the mature
+    // ready-queue path.
+    return b > 0 && b < 128;
+}
+
+std::size_t idleSpinIterations(bool fast_phase_enabled) {
+    if (const char *env = std::getenv("COMPILER2026_DAG_IDLE_SPIN")) {
+        char *end = nullptr;
+        const unsigned long configured = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0') {
+            return static_cast<std::size_t>(configured);
+        }
+    }
+    return fast_phase_enabled ? 20000 : 0;
+}
+
+inline void cpuRelax() {
+#if defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("pause" ::: "memory");
+#else
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+}
+
 // 0 means "let the runtime size the submit batch from the problem shape".
 std::size_t dagSubmitBatchOverride() {
     static const std::size_t value = []() -> std::size_t {
@@ -124,6 +156,11 @@ class AsyncRuntime {
         std::uint64_t exec_ns = 0;
     };
 
+    struct alignas(64) FastWorkerState {
+        std::atomic<std::uint64_t> done_epoch{0};
+        std::atomic<bool> in_session{false};
+    };
+
     struct DagNode {
         TaskFn fn = nullptr;
         void *context = nullptr;
@@ -163,7 +200,8 @@ public:
     explicit AsyncRuntime(std::size_t worker_count)
         : critical_priority_enabled_(criticalPriorityEnabledFromEnv()),
           pin_workers_(workerPinningEnabledFromEnv()),
-          worker_cpus_(pin_workers_ ? allowedCpuList() : std::vector<int>{}) {
+          worker_cpus_(pin_workers_ ? allowedCpuList() : std::vector<int>{}),
+          fast_worker_states_(worker_count) {
         if (worker_count == 0) {
             return;
         }
@@ -197,6 +235,7 @@ public:
     }
 
     ~AsyncRuntime() {
+        endFastSession();
         wait();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -220,6 +259,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             active_workers_ =
                 std::min(total_threads > 1 ? total_threads - 1 : 0, workers_.size());
+            fast_phase_enabled_ = fastPhaseEnabledForTile(b);
+            idle_spin_iterations_.store(
+                idleSpinIterations(fast_phase_enabled_), std::memory_order_relaxed);
         }
         // Wake anything this call promotes back into the active set.
         park_cv_.notify_all();
@@ -228,6 +270,7 @@ public:
     }
 
     void finishCall() {
+        endFastSession();
         wait();
         reportProfile();
         resetQueue(0, 1);
@@ -350,8 +393,17 @@ public:
         }
 
         if (task_batch_size_ > 1) {
+            if (pending_count_ >= pending_tasks_.size()) {
+                pending_tasks_.resize(std::max<std::size_t>(
+                    pending_count_ + 1,
+                    std::max<std::size_t>(pending_tasks_.size() * 2, 64)));
+            }
             pending_tasks_[pending_count_++] = task;
-            if (pending_count_ >= submit_stage_size_) {
+            // A persistent fast session consumes one immutable phase directly
+            // from pending_tasks_. Splitting a large phase between that buffer
+            // and the generic ready queue would strand the queued prefix while
+            // workers remain in the lock-free session.
+            if (!fast_phase_enabled_ && pending_count_ >= submit_stage_size_) {
                 flushPendingTasks();
             }
             return;
@@ -369,11 +421,16 @@ public:
     // per madd (17.99x fine against 11.43x coarse). Dividing a fixed flop budget
     // by the 2*b^3 a single madd carries reproduces both ends and interpolates
     // between them, so the Pass does not have to choose.
-    void submitRange(RangeFn fn, void *context, int count) {
+    void submitRange(RangeFn fn, void *context, int count, int requested_grain = 0) {
         if (count <= 0) {
             return;
         }
-        const std::size_t chunk = rangeChunkLength(static_cast<std::size_t>(count));
+        const std::size_t chunk = requested_grain > 0
+                                      ? std::min<std::size_t>(
+                                            static_cast<std::size_t>(count),
+                                            static_cast<std::size_t>(requested_grain))
+                                      : rangeChunkLength(
+                                            static_cast<std::size_t>(count));
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         for (int begin = 0; begin < count;) {
             const int end =
@@ -392,8 +449,13 @@ public:
                     recordBatchProfileLocked(&task, 1, profile, false);
                 }
             } else {
+                if (pending_count_ >= pending_tasks_.size()) {
+                    pending_tasks_.resize(std::max<std::size_t>(
+                        pending_count_ + 1,
+                        std::max<std::size_t>(pending_tasks_.size() * 2, 64)));
+                }
                 pending_tasks_[pending_count_++] = task;
-                if (pending_count_ >= submit_stage_size_) {
+                if (!fast_phase_enabled_ && pending_count_ >= submit_stage_size_) {
                     flushPendingTasks();
                 }
             }
@@ -665,7 +727,7 @@ public:
             should_notify = ready <= activeWorkerCount();
         }
         if (should_notify) {
-            work_cv_.notify_one();
+            notifyWorkers(1);
         }
     }
 
@@ -695,6 +757,11 @@ public:
         if (count == 0) {
             return;
         }
+        // Publish a cheap phase/work generation before touching the futex-backed
+        // condition variable. Workers may observe this outside mutex_ while
+        // briefly spinning between fine-grained phases; after observing it they
+        // always re-acquire mutex_ and re-check the real queue predicate.
+        work_epoch_.fetch_add(1, std::memory_order_release);
         if (count >= activeWorkerCount()) {
             work_cv_.notify_all();
             return;
@@ -707,6 +774,10 @@ public:
     void wait() {
         const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
         const std::uint64_t wait_enter_ns = profiling ? nowNs() : 0;
+        if (tryRunPendingFastPhase(profiling, wait_enter_ns)) {
+            return;
+        }
+        endFastSession();
         flushPendingTasks();
         if (profiling) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -876,6 +947,122 @@ public:
     }
 
 private:
+    void runFastPhaseParticipant(std::size_t slot, bool worker_thread,
+                                 bool profiling, std::uint64_t epoch) {
+        const std::size_t task_count = fast_task_count_;
+        const std::size_t participants = fast_worker_count_ + 1;
+        for (std::size_t index = slot; index < task_count; index += participants) {
+            const Task *task = &pending_tasks_[index];
+            BatchProfile profile = runBatch(task, 1, profiling);
+            if (profiling) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                recordBatchProfileLocked(task, 1, profile, worker_thread);
+            }
+        }
+        if (worker_thread) {
+            fast_worker_states_[slot].done_epoch.store(epoch,
+                                                        std::memory_order_release);
+        }
+    }
+
+    bool runFastSessionIfPublished(std::size_t worker_index,
+                                   std::uint64_t &seen_epoch, bool profiling) {
+        if (fast_phase_epoch_.load(std::memory_order_acquire) == seen_epoch) {
+            return false;
+        }
+        if (worker_index >= fast_worker_count_) {
+            seen_epoch = fast_phase_epoch_.load(std::memory_order_acquire);
+            return true;
+        }
+
+        FastWorkerState &state = fast_worker_states_[worker_index];
+        state.in_session.store(true, std::memory_order_release);
+        while (fast_session_active_.load(std::memory_order_acquire)) {
+            const std::uint64_t epoch =
+                fast_phase_epoch_.load(std::memory_order_acquire);
+            if (epoch != seen_epoch) {
+                seen_epoch = epoch;
+                runFastPhaseParticipant(worker_index, true, profiling, epoch);
+            } else {
+                cpuRelax();
+            }
+        }
+        state.in_session.store(false, std::memory_order_release);
+        return true;
+    }
+
+    void endFastSession() {
+        if (!fast_session_active_.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+        for (std::size_t worker = 0; worker < fast_worker_count_; ++worker) {
+            while (fast_worker_states_[worker].in_session.load(
+                std::memory_order_acquire)) {
+                cpuRelax();
+            }
+        }
+    }
+
+    bool tryRunPendingFastPhase(bool profiling, std::uint64_t wait_enter_ns) {
+        if (!fast_phase_enabled_ || pending_count_ == 0 || activeWorkerCount() == 0) {
+            return false;
+        }
+
+        const bool starting_session =
+            !fast_session_active_.load(std::memory_order_acquire);
+        if (starting_session) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // This path is deliberately narrower than the generic scheduler:
+            // it only handles a fully submitted, dependency-free phase while
+            // every old queue and DAG node is drained. Opt-in DAG modes and any
+            // phase that published early keep using the original ready queue.
+            if (hasReadyTasksLocked() || active_tasks_ != 0 || pending_dag_tasks_ != 0 ||
+                !dag_staging_.empty()) {
+                return false;
+            }
+            fast_task_count_ = pending_count_;
+            fast_worker_count_ = activeWorkerCount();
+            fast_session_active_.store(true, std::memory_order_release);
+        }
+        fast_task_count_ = pending_count_;
+        if (profiling) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++submit_flushes_;
+            recordReadyWidthLocked(fast_task_count_);
+            recordWaitEntryLocked();
+        }
+        const std::uint64_t epoch =
+            fast_phase_epoch_.fetch_add(1, std::memory_order_release) + 1;
+        work_epoch_.fetch_add(1, std::memory_order_release);
+        if (starting_session) {
+            work_cv_.notify_all();
+        }
+
+        // The caller is a real participant, matching the existing wait() path.
+        runFastPhaseParticipant(fast_worker_count_, false, profiling, epoch);
+        for (std::size_t worker = 0; worker < fast_worker_count_; ++worker) {
+            while (fast_worker_states_[worker].done_epoch.load(
+                       std::memory_order_acquire) != epoch) {
+                cpuRelax();
+            }
+        }
+        pending_count_ = 0;
+
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (worker_error_) {
+                error = worker_error_;
+                worker_error_ = nullptr;
+            }
+        }
+        recordWaitProfile(profiling, wait_enter_ns);
+        if (error) {
+            std::rethrow_exception(error);
+        }
+        return true;
+    }
+
     void pinCurrentWorker(std::size_t worker_index) {
 #ifdef __linux__
         if (!pin_workers_ || worker_cpus_.empty()) {
@@ -893,11 +1080,22 @@ private:
 
     void workerLoop(std::size_t worker_index) {
         pinCurrentWorker(worker_index);
+        std::uint64_t seen_fast_phase =
+            fast_phase_epoch_.load(std::memory_order_acquire);
         while (true) {
+            const bool phase_profiling =
+                profile_enabled_.load(std::memory_order_relaxed);
+            if (runFastSessionIfPublished(worker_index, seen_fast_phase,
+                                          phase_profiling)) {
+                continue;
+            }
             std::array<Task, kMaxTaskBatch> batch{};
             std::size_t batch_count = 0;
             const bool profiling = profile_enabled_.load(std::memory_order_relaxed);
             const std::uint64_t wait_start_ns = profiling ? nowNs() : 0;
+            std::uint64_t observed_epoch = 0;
+            std::size_t spin_iterations = 0;
+            bool spin_before_park = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 park_cv_.wait(lock, [this, worker_index]() {
@@ -906,9 +1104,72 @@ private:
                 if (stopping_) {
                     return;
                 }
-                work_cv_.wait(lock, [this, worker_index]() {
+                if (worker_index >= activeWorkerCount()) {
+                    continue;  // demoted by a new call; go back to the park gate
+                }
+                if (fast_phase_epoch_.load(std::memory_order_acquire) !=
+                    seen_fast_phase) {
+                    continue;
+                }
+                if (hasReadyTasksLocked()) {
+                    if (profiling) {
+                        worker_idle_ns_ += nowNs() - wait_start_ns;
+                    }
+                    batch_count = takeReadyTasksLocked(batch.data());
+                } else {
+                    // No publisher can change work_epoch_ until this lock is
+                    // released, so this snapshot closes the lost-wakeup window.
+                    observed_epoch = work_epoch_.load(std::memory_order_relaxed);
+                    spin_iterations =
+                        idle_spin_iterations_.load(std::memory_order_relaxed);
+                    spin_before_park = spin_iterations != 0;
+                    if (!spin_before_park) {
+                        work_cv_.wait(lock, [this, worker_index, &seen_fast_phase]() {
+                            return stopping_ || worker_index >= activeWorkerCount() ||
+                                   hasReadyTasksLocked() ||
+                                   fast_phase_epoch_.load(std::memory_order_acquire) !=
+                                       seen_fast_phase;
+                        });
+                        if (profiling) {
+                            worker_idle_ns_ += nowNs() - wait_start_ns;
+                        }
+                        if (stopping_ && !hasReadyTasksLocked()) {
+                            return;
+                        }
+                        if (worker_index >= activeWorkerCount()) {
+                            continue;
+                        }
+                        if (fast_phase_epoch_.load(std::memory_order_acquire) !=
+                            seen_fast_phase) {
+                            continue;
+                        }
+                        batch_count = takeReadyTasksLocked(batch.data());
+                    }
+                }
+            }
+
+            if (spin_before_park) {
+                for (std::size_t i = 0; i < spin_iterations; ++i) {
+                    if (work_epoch_.load(std::memory_order_acquire) != observed_epoch) {
+                        break;
+                    }
+                    cpuRelax();
+                }
+
+                // A dependency-free phase is published through its own epoch.
+                // Jump straight to the lock-free participant path instead of
+                // joining the mutex/futex herd merely to discover that epoch.
+                if (fast_phase_epoch_.load(std::memory_order_acquire) !=
+                    seen_fast_phase) {
+                    continue;
+                }
+
+                std::unique_lock<std::mutex> lock(mutex_);
+                work_cv_.wait(lock, [this, worker_index, &seen_fast_phase]() {
                     return stopping_ || worker_index >= activeWorkerCount() ||
-                           hasReadyTasksLocked();
+                           hasReadyTasksLocked() ||
+                           fast_phase_epoch_.load(std::memory_order_acquire) !=
+                               seen_fast_phase;
                 });
                 if (profiling) {
                     worker_idle_ns_ += nowNs() - wait_start_ns;
@@ -917,7 +1178,11 @@ private:
                     return;
                 }
                 if (worker_index >= activeWorkerCount()) {
-                    continue;  // demoted by a new call; go back to the park gate
+                    continue;
+                }
+                if (fast_phase_epoch_.load(std::memory_order_acquire) !=
+                    seen_fast_phase) {
+                    continue;
                 }
                 batch_count = takeReadyTasksLocked(batch.data());
             }
@@ -1422,10 +1687,22 @@ private:
     std::condition_variable work_cv_;
     std::condition_variable park_cv_;
     std::condition_variable done_cv_;
+    std::atomic<std::uint64_t> work_epoch_{0};
+    std::atomic<std::uint64_t> fast_phase_epoch_{0};
+    std::atomic<bool> fast_session_active_{false};
     std::vector<std::unique_ptr<unsigned char[]>> chunks_;
     std::size_t chunk_size_ = 0;
     std::size_t chunk_offset_ = 0;
     std::size_t active_tasks_ = 0;
+    // A worker may remain in the lock-free fast lane while resetForCall prepares
+    // the next invocation, so this per-call policy value is atomic as well.
+    std::atomic<std::size_t> idle_spin_iterations_{0};
+    bool fast_phase_enabled_ = false;
+    // Published immediately before fast_phase_epoch_. The submitter does not
+    // reuse pending_tasks_ until every active worker and the main participant
+    // has acknowledged completion through fast_done_.
+    std::size_t fast_task_count_ = 0;
+    std::size_t fast_worker_count_ = 0;
     // Only wait_key users need completion notifications before the whole DAG drains.
     std::size_t key_waiters_ = 0;
     bool stopping_ = false;
@@ -1476,6 +1753,7 @@ private:
     bool critical_priority_enabled_ = false;
     bool pin_workers_ = false;
     std::vector<int> worker_cpus_;
+    std::vector<FastWorkerState> fast_worker_states_;
 };
 
 thread_local std::unique_ptr<AsyncRuntime> runtime;
@@ -1653,6 +1931,21 @@ std::size_t resolveThreadCount(int n, int b) {
     // round, and n=256 b=32 goes to 3.16x. Leaving the count at the hardware
     // thread count for every b>=24 case also stops the worker pool from being
     // torn down and rebuilt as the judge walks between cases with different b.
+    if (std::getenv("COMPILER2026_DAG_PARTICIPANT_CAP") == nullptr &&
+        fastPhaseEnabledForTile(b)) {
+        // Once phase tasks no longer serialize on the ready-queue mutex, the
+        // sustainable count is governed primarily by total matrix work. Across
+        // the public small-tile sizes the measured optima follow one simple
+        // staircase: n=384 -> 24, 512 -> 32, 576 -> 32, and n>=640 -> 40.
+        // Express that as 8 participants per complete 128 rows and cap it by the
+        // configured/hardware thread count. Explicit PARTICIPANT_CAP continues
+        // to bypass this rule for experiments.
+        const std::size_t shape_cap = std::max<std::size_t>(
+            1, static_cast<std::size_t>(n / 128) * 8);
+        const std::size_t spin_safe_cap = (threads > 2) ? threads - 2 : threads;
+        return std::max<std::size_t>(
+            1, std::min(spin_safe_cap, shape_cap));
+    }
     return std::max<std::size_t>(1, std::min(threads, participantCapForTile(b)));
 }
 
@@ -1902,10 +2195,63 @@ extern "C" void compiler2026_runtime_submit(TaskFn fn, void *context) {
     activeRuntime().submit(fn, context);
 }
 
+// Cache-locality grouping for Pass-generated multidimensional ranges. The
+// runtime only returns a group width; the Pass owns the meaning of each logical
+// range index. The override is process-wide so knob sweeps do not pay getenv in
+// every panel.
+extern "C" int compiler2026_runtime_range_group_width(int matrix_size,
+                                                        int tile_size) {
+    static const int configured = []() {
+        const char *env = std::getenv("COMPILER2026_RANGE_GROUP_WIDTH");
+        if (env == nullptr || env[0] == '\0') {
+            return 0;
+        }
+        char *end = nullptr;
+        const long value = std::strtol(env, &end, 10);
+        return (end != env && *end == '\0' && value > 0 && value <= 16)
+                   ? static_cast<int>(value)
+                   : 0;
+    }();
+    if (configured > 0) {
+        return configured;
+    }
+    if (matrix_size <= 0 || tile_size <= 0) {
+        return 1;
+    }
+    const int blocks = matrix_size / tile_size;
+    if (tile_size <= 12) {
+        // One extra reuse lane per sixteen blocks keeps enough independent 2-D
+        // groups for the worker pool. Round to an even width so the triangular
+        // edge is distributed symmetrically. The cache-derived cap is eight for
+        // b=8 and six for b=10/12 on this 64 KiB-L1 aarch64 host.
+        int width = std::max(2, (blocks + 15) / 16);
+        if ((width & 1) != 0) {
+            ++width;
+        }
+        int cache_cap = std::max(2, 72 / tile_size);
+        cache_cap &= ~1;
+        return std::max(2, std::min(width, cache_cap));
+    }
+    if (tile_size < 18) {
+        return blocks >= 64 ? 4 : 2;
+    }
+    if (tile_size < 28) {
+        return 2;
+    }
+    return 1;
+}
+
 // Generic parallel-for over [0, count). The Pass owns what an index means; the
 // runtime only decides how to cut the range up.
 extern "C" void compiler2026_runtime_submit_range(RangeFn fn, void *context, int count) {
     activeRuntime().submitRange(fn, context, count);
+}
+
+// Generic parallel-for with an explicit maximum number of logical indices per
+// task. A non-positive grain keeps the runtime's adaptive default.
+extern "C" void compiler2026_runtime_submit_range_grain(RangeFn fn, void *context,
+                                                          int count, int grain) {
+    activeRuntime().submitRange(fn, context, count, grain);
 }
 
 extern "C" void compiler2026_runtime_submit_deps(TaskFn fn, void *context,

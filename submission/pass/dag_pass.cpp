@@ -12,6 +12,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <cstdlib>
@@ -26,6 +27,8 @@ constexpr const char *kBegin = "compiler2026_runtime_begin";
 constexpr const char *kAlloc = "compiler2026_runtime_alloc";
 constexpr const char *kSubmit = "compiler2026_runtime_submit";
 constexpr const char *kSubmitRange = "compiler2026_runtime_submit_range";
+constexpr const char *kSubmitRangeGrain = "compiler2026_runtime_submit_range_grain";
+constexpr const char *kRangeGroupWidth = "compiler2026_runtime_range_group_width";
 constexpr const char *kSubmitDeps = "compiler2026_runtime_submit_deps";
 constexpr const char *kSubmitDeps3 = "compiler2026_runtime_submit_deps3";
 constexpr const char *kSubmitDeps3Priority =
@@ -44,6 +47,8 @@ struct RuntimeApi {
     llvm::FunctionCallee alloc;
     llvm::FunctionCallee submit;
     llvm::FunctionCallee submit_range;
+    llvm::FunctionCallee submit_range_grain;
+    llvm::FunctionCallee range_group_width;
     llvm::FunctionCallee submit_deps;
     llvm::FunctionCallee submit_deps3;
     llvm::FunctionCallee submit_deps3_priority;
@@ -158,6 +163,11 @@ RuntimeApi getRuntimeApi(llvm::Module &module) {
         module.getOrInsertFunction(kAlloc, alloc_ty),
         declareVoidRuntime(module, kSubmit, {ptr_ty, ptr_ty}),
         declareVoidRuntime(module, kSubmitRange, {ptr_ty, ptr_ty, int32_ty}),
+        declareVoidRuntime(module, kSubmitRangeGrain,
+                           {ptr_ty, ptr_ty, int32_ty, int32_ty}),
+        module.getOrInsertFunction(
+            kRangeGroupWidth,
+            llvm::FunctionType::get(int32_ty, {int32_ty, int32_ty}, false)),
         declareVoidRuntime(module, kSubmitDeps, {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty}),
         declareVoidRuntime(module, kSubmitDeps3,
                            {ptr_ty, ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty}),
@@ -775,6 +785,269 @@ bool replaceMaddLoopWithRangeSubmit(llvm::CallBase *call, llvm::Loop *loop,
     return true;
 }
 
+llvm::StructType *getMaddTileRangeContext(llvm::Module &module) {
+    llvm::LLVMContext &context = module.getContext();
+    if (llvm::StructType *existing = llvm::StructType::getTypeByName(
+            context, "compiler2026.madd_tile_range_context")) {
+        return existing;
+    }
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::StructType *ty = llvm::StructType::create(
+        context, "compiler2026.madd_tile_range_context");
+    // Matrix base, panel row, lda, tile size, number of tile groups, group width.
+    ty->setBody({ptr_ty, int32_ty, int32_ty, int32_ty, int32_ty, int32_ty});
+    return ty;
+}
+
+// Build a generic range task whose logical indices are lower-triangular 2-D
+// groups. A 4x4 group calls the official madd up to sixteen times while the four
+// A and four B tiles are still resident in the executing core's cache.
+llvm::Function *getMaddTileRangeTask(llvm::Module &module,
+                                    llvm::StructType *tile_ctx_ty) {
+    if (llvm::Function *existing =
+            module.getFunction("compiler2026_task_madd_tile_range")) {
+        return existing;
+    }
+
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(context);
+    llvm::Type *int32_ty = llvm::Type::getInt32Ty(context);
+    llvm::Type *int64_ty = llvm::Type::getInt64Ty(context);
+    llvm::FunctionType *task_ty = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context), {ptr_ty, int32_ty, int32_ty}, false);
+    llvm::Function *task_fn = llvm::Function::Create(
+        task_ty, llvm::GlobalValue::InternalLinkage,
+        "compiler2026_task_madd_tile_range", module);
+    task_fn->addFnAttr("compiler2026.skip");
+
+    llvm::FunctionType *operator_ty = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context),
+        {ptr_ty, ptr_ty, ptr_ty, int32_ty, int32_ty}, false);
+    llvm::FunctionCallee madd_fn = module.getOrInsertFunction("madd", operator_ty);
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", task_fn);
+    llvm::BasicBlock *task_loop =
+        llvm::BasicBlock::Create(context, "task.loop", task_fn);
+    llvm::BasicBlock *map_loop =
+        llvm::BasicBlock::Create(context, "map.loop", task_fn);
+    llvm::BasicBlock *map_next =
+        llvm::BasicBlock::Create(context, "map.next", task_fn);
+    llvm::BasicBlock *tile_setup =
+        llvm::BasicBlock::Create(context, "tile.setup", task_fn);
+    llvm::BasicBlock *row_loop =
+        llvm::BasicBlock::Create(context, "row.loop", task_fn);
+    llvm::BasicBlock *col_loop =
+        llvm::BasicBlock::Create(context, "col.loop", task_fn);
+    llvm::BasicBlock *col_body =
+        llvm::BasicBlock::Create(context, "col.body", task_fn);
+    llvm::BasicBlock *row_next =
+        llvm::BasicBlock::Create(context, "row.next", task_fn);
+    llvm::BasicBlock *task_next =
+        llvm::BasicBlock::Create(context, "task.next", task_fn);
+    llvm::BasicBlock *exit = llvm::BasicBlock::Create(context, "exit", task_fn);
+
+    llvm::Argument *ctx_arg = task_fn->getArg(0);
+    llvm::Argument *begin_arg = task_fn->getArg(1);
+    llvm::Argument *end_arg = task_fn->getArg(2);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *matrix =
+        builder.CreateLoad(ptr_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 0));
+    llvm::Value *panel =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 1));
+    llvm::Value *lda =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 2));
+    llvm::Value *tile =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 3));
+    llvm::Value *groups =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 4));
+    llvm::Value *group_width =
+        builder.CreateLoad(int32_ty, fieldPtr(builder, tile_ctx_ty, ctx_arg, 5));
+    builder.CreateCondBr(builder.CreateICmpSLT(begin_arg, end_arg), task_loop, exit);
+
+    builder.SetInsertPoint(task_loop);
+    llvm::PHINode *task_index = builder.CreatePHI(int32_ty, 2, "tile.task");
+    task_index->addIncoming(begin_arg, entry);
+    builder.CreateBr(map_loop);
+
+    // Map a packed lower-triangle index to (row_group, col_group). Group column
+    // c owns groups-c consecutive indices.
+    builder.SetInsertPoint(map_loop);
+    llvm::PHINode *residual = builder.CreatePHI(int32_ty, 2, "tile.residual");
+    llvm::PHINode *col_group = builder.CreatePHI(int32_ty, 2, "tile.col.group");
+    llvm::PHINode *span = builder.CreatePHI(int32_ty, 2, "tile.span");
+    residual->addIncoming(task_index, task_loop);
+    col_group->addIncoming(builder.getInt32(0), task_loop);
+    span->addIncoming(groups, task_loop);
+    builder.CreateCondBr(builder.CreateICmpSGE(residual, span), map_next,
+                         tile_setup);
+
+    builder.SetInsertPoint(map_next);
+    llvm::Value *next_residual = builder.CreateSub(residual, span);
+    llvm::Value *next_col_group = builder.CreateAdd(col_group, builder.getInt32(1));
+    llvm::Value *next_span = builder.CreateSub(span, builder.getInt32(1));
+    residual->addIncoming(next_residual, map_next);
+    col_group->addIncoming(next_col_group, map_next);
+    span->addIncoming(next_span, map_next);
+    builder.CreateBr(map_loop);
+
+    builder.SetInsertPoint(tile_setup);
+    llvm::Value *row_group = builder.CreateAdd(col_group, residual);
+    llvm::Value *block_stride = builder.CreateMul(group_width, tile);
+    llvm::Value *trailing = builder.CreateAdd(panel, tile);
+    llvm::Value *col_start = builder.CreateAdd(
+        trailing, builder.CreateMul(col_group, block_stride));
+    llvm::Value *row_start = builder.CreateAdd(
+        trailing, builder.CreateMul(row_group, block_stride));
+    llvm::Value *col_limit_unclamped = builder.CreateAdd(col_start, block_stride);
+    llvm::Value *row_limit_unclamped = builder.CreateAdd(row_start, block_stride);
+    llvm::Value *col_limit = builder.CreateSelect(
+        builder.CreateICmpSLT(col_limit_unclamped, lda), col_limit_unclamped, lda);
+    llvm::Value *row_limit = builder.CreateSelect(
+        builder.CreateICmpSLT(row_limit_unclamped, lda), row_limit_unclamped, lda);
+    builder.CreateBr(row_loop);
+
+    builder.SetInsertPoint(row_loop);
+    llvm::PHINode *row = builder.CreatePHI(int32_ty, 2, "tile.row");
+    row->addIncoming(row_start, tile_setup);
+    llvm::Value *row_col_limit = builder.CreateAdd(row, tile);
+    llvm::Value *col_end = builder.CreateSelect(
+        builder.CreateICmpSLT(row_col_limit, col_limit), row_col_limit, col_limit);
+    builder.CreateBr(col_loop);
+
+    builder.SetInsertPoint(col_loop);
+    llvm::PHINode *col = builder.CreatePHI(int32_ty, 2, "tile.col");
+    col->addIncoming(col_start, row_loop);
+    builder.CreateCondBr(builder.CreateICmpSLT(col, col_end), col_body, row_next);
+
+    builder.SetInsertPoint(col_body);
+    llvm::Value *wide_lda = builder.CreateSExt(lda, int64_ty);
+    llvm::Value *wide_panel = builder.CreateSExt(panel, int64_ty);
+    llvm::Value *wide_row = builder.CreateSExt(row, int64_ty);
+    llvm::Value *wide_col = builder.CreateSExt(col, int64_ty);
+    llvm::Value *a_offset = builder.CreateAdd(
+        builder.CreateMul(wide_row, wide_lda), wide_panel);
+    llvm::Value *b_offset = builder.CreateAdd(
+        builder.CreateMul(wide_col, wide_lda), wide_panel);
+    llvm::Value *c_offset = builder.CreateAdd(
+        builder.CreateMul(wide_row, wide_lda), wide_col);
+    llvm::Value *a_ptr =
+        builder.CreateInBoundsGEP(builder.getDoubleTy(), matrix, a_offset);
+    llvm::Value *b_ptr =
+        builder.CreateInBoundsGEP(builder.getDoubleTy(), matrix, b_offset);
+    llvm::Value *c_ptr =
+        builder.CreateInBoundsGEP(builder.getDoubleTy(), matrix, c_offset);
+    builder.CreateCall(madd_fn, {a_ptr, b_ptr, c_ptr, tile, lda});
+    llvm::Value *next_col = builder.CreateAdd(col, tile);
+    col->addIncoming(next_col, col_body);
+    builder.CreateBr(col_loop);
+
+    builder.SetInsertPoint(row_next);
+    llvm::Value *next_row = builder.CreateAdd(row, tile);
+    row->addIncoming(next_row, row_next);
+    builder.CreateCondBr(builder.CreateICmpSLT(next_row, row_limit), row_loop,
+                         task_next);
+
+    builder.SetInsertPoint(task_next);
+    llvm::Value *next_task = builder.CreateAdd(task_index, builder.getInt32(1));
+    task_index->addIncoming(next_task, task_next);
+    builder.CreateCondBr(builder.CreateICmpSLT(next_task, end_arg), task_loop, exit);
+
+    builder.SetInsertPoint(exit);
+    builder.CreateRetVoid();
+    return task_fn;
+}
+
+// Replace the full triangular madd nest with one range submit per panel. The
+// transform is intentionally restricted to the annotated baseline shape. If the
+// outer induction cannot be recovered exactly, the caller retains the proven
+// one-dimensional range path.
+bool replaceMaddNestWithTileRangeSubmit(
+    llvm::CallBase *call, llvm::Loop *inner_loop, llvm::Value *matrix_l,
+    llvm::Value *n, llvm::Value *b, llvm::StructType *tile_ctx_ty,
+    llvm::FunctionCallee alloc, llvm::FunctionCallee submit_range_grain,
+    llvm::FunctionCallee range_group_width, llvm::Function *tile_task,
+    llvm::DominatorTree &dominator_tree,
+    llvm::LoopInfo &loop_info) {
+    if (inner_loop == nullptr || !inner_loop->getSubLoops().empty()) {
+        return false;
+    }
+    llvm::Loop *outer_loop = inner_loop->getParentLoop();
+    if (outer_loop == nullptr) {
+        return false;
+    }
+    llvm::BasicBlock *preheader = outer_loop->getLoopPreheader();
+    if (preheader == nullptr) {
+        llvm::BasicBlock *predecessor = outer_loop->getLoopPredecessor();
+        if (predecessor == nullptr) {
+            return false;
+        }
+        preheader = llvm::SplitEdge(predecessor, outer_loop->getHeader(),
+                                    &dominator_tree, &loop_info);
+        if (preheader == nullptr) {
+            return false;
+        }
+    }
+
+    llvm::PHINode *outer_induction = nullptr;
+    for (llvm::PHINode &phi : outer_loop->getHeader()->phis()) {
+        if (!phi.getType()->isIntegerTy() ||
+            phi.getBasicBlockIndex(preheader) < 0) {
+            continue;
+        }
+        if (outer_induction != nullptr) {
+            return false;
+        }
+        outer_induction = &phi;
+    }
+    if (outer_induction == nullptr) {
+        return false;
+    }
+    llvm::Value *first_row = outer_induction->getIncomingValueForBlock(preheader);
+    if (first_row == nullptr) {
+        return false;
+    }
+
+    llvm::Module *module = call->getModule();
+    llvm::IRBuilder<> builder(preheader->getTerminator());
+    llvm::Value *wide_b = builder.CreateSExtOrTrunc(b, first_row->getType());
+    llvm::Value *panel_wide = builder.CreateSub(first_row, wide_b);
+    llvm::Value *panel = builder.CreateSExtOrTrunc(panel_wide, builder.getInt32Ty());
+    llvm::Value *remaining = builder.CreateSDiv(
+        builder.CreateSub(builder.CreateSub(n, panel), b), b);
+    llvm::Value *group_width = builder.CreateCall(range_group_width, {n, b});
+    llvm::Value *groups = builder.CreateSDiv(
+        builder.CreateAdd(remaining,
+                          builder.CreateSub(group_width, builder.getInt32(1))),
+        group_width);
+    llvm::Value *group_count = builder.CreateSDiv(
+        builder.CreateMul(groups, builder.CreateAdd(groups, builder.getInt32(1))),
+        builder.getInt32(2));
+
+    const llvm::DataLayout &layout = module->getDataLayout();
+    llvm::Type *size_ty = llvm::IntegerType::get(
+        module->getContext(), layout.getPointerSizeInBits());
+    llvm::Value *ctx = builder.CreateCall(
+        alloc, {llvm::ConstantInt::get(
+                   size_ty, layout.getTypeAllocSize(tile_ctx_ty).getFixedValue())});
+    builder.CreateStore(matrix_l, fieldPtr(builder, tile_ctx_ty, ctx, 0));
+    builder.CreateStore(panel, fieldPtr(builder, tile_ctx_ty, ctx, 1));
+    builder.CreateStore(n, fieldPtr(builder, tile_ctx_ty, ctx, 2));
+    builder.CreateStore(b, fieldPtr(builder, tile_ctx_ty, ctx, 3));
+    builder.CreateStore(groups, fieldPtr(builder, tile_ctx_ty, ctx, 4));
+    builder.CreateStore(group_width, fieldPtr(builder, tile_ctx_ty, ctx, 5));
+    // 4x4 groups are already coarse enough and need one task each for phase
+    // width. The scalar fallback keeps the runtime's existing adaptive grain.
+    llvm::Value *grain = builder.CreateSelect(
+        builder.CreateICmpEQ(group_width, builder.getInt32(1)), builder.getInt32(0),
+        builder.getInt32(1));
+    builder.CreateCall(submit_range_grain,
+                       {tile_task, ctx, group_count, grain});
+
+    call->eraseFromParent();
+    return true;
+}
+
 void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskIr &task_ir,
                             bool has_tile_dag_annotation) {
     llvm::DominatorTree dominator_tree(async_fn);
@@ -939,14 +1212,28 @@ void transformAsyncFunction(llvm::Function &async_fn, RuntimeApi &runtime, TaskI
         // n=1152 b=16 profile showed dominating.
         llvm::StructType *range_ctx_ty = getMaddRangeContext(*async_fn.getParent());
         llvm::Function *range_task = getMaddRangeTask(*async_fn.getParent(), range_ctx_ty);
+        llvm::StructType *tile_ctx_ty =
+            getMaddTileRangeContext(*async_fn.getParent());
+        llvm::Function *tile_task =
+            getMaddTileRangeTask(*async_fn.getParent(), tile_ctx_ty);
         entry_builder.CreateCall(runtime.register_task,
                                  {range_task,
                                   entry_builder.CreateGlobalStringPtr("madd_range")});
+        entry_builder.CreateCall(
+            runtime.register_task,
+            {tile_task, entry_builder.CreateGlobalStringPtr("madd_tile_range")});
         for (llvm::CallBase *call : madd_calls) {
             llvm::Loop *loop = loop_info.getLoopFor(call->getParent());
             llvm::Loop *sync_loop =
                 (loop != nullptr && loop->getParentLoop() != nullptr) ? loop->getParentLoop() : loop;
             addLoopExitWaits(sync_loop, runtime.wait, wait_blocks);
+            if (has_tile_dag_annotation &&
+                replaceMaddNestWithTileRangeSubmit(
+                    call, loop, matrix_l, n, b, tile_ctx_ty, runtime.alloc,
+                    runtime.submit_range_grain, runtime.range_group_width,
+                    tile_task, dominator_tree, loop_info)) {
+                continue;
+            }
             if (has_tile_dag_annotation &&
                 replaceMaddLoopWithRangeSubmit(call, loop, matrix_l, n, b, range_ctx_ty,
                                                runtime.alloc, runtime.submit_range,

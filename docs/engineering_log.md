@@ -2668,3 +2668,78 @@ Round 14 把 range chunk 预算从 200000 调到 50000 flops,依据是"每个 ta
 **区分这两者是下一步第一件事**,因为修法完全不同(二维 tiling 提高复用 vs per-worker deque)。
 
 细节和实验步骤见 `docs/roadmap.md` 开头新增的一节。
+
+## 2026-08-05 持久无锁 phase 与二维 MADD tiling（Round 17–25）
+
+### 落地内容
+
+- runtime 为依赖为空的 panel phase 增加持久 epoch session。worker 在一次
+  `block_cholesky` 内不反复经过共享 ready queue / mutex / futex，而是循环静态领取
+  `pending_tasks_`，用 cache-line 对齐的逐 worker epoch 完成确认。
+- fast phase 默认只用于 `b<128`；`b>=128` 保留成熟队列路径。
+- 大 phase 不再按 staging 上限拆到普通队列；`pending_tasks_` 动态扩容并保持整 phase
+  不可变。否则 worker 驻留 fast session 时，刷入普通队列的前缀会被搁置。这个边界曾在
+  `1024:8`（首 phase 528 task > 312 staging）产生 verifier `inf`，修复后恢复 PASS。
+- Pass 把每 panel 的 MADD 下三角域改写为二维 group range。每个逻辑 task 遍历一个
+  `(row_group,col_group)` 块并逐个直接调用官方 `madd`；没有修改或隐藏官方 ABI。
+- group 宽度由矩阵 block 数和 tile cache footprint 决定；保留
+  `COMPILER2026_RANGE_GROUP_WIDTH` 作为单旋钮复现实验入口。
+
+### 关键正确性与全量结果
+
+全量命令:
+
+```bash
+LABEL=r20_cg_tile_group_default PASSES=3 REPEAT=1 \
+  ./scripts/percase_bench_chunked.sh
+```
+
+五段均通过 verifier，合并为 **150/150 PASS**:
+
+| 版本 | geomean | 总分 | 证据 |
+| --- | ---: | ---: | --- |
+| 持久无锁 phase | 6.123237x | 51.48 | `r17_cg_fast_phase_default.csv` |
+| + 二维 MADD tiling | **7.005795x** | **53.14** | `r20_cg_tile_group_default.csv` |
+
+Round 20 分桶是 `6.61x / 9.07x / 7.98x / 3.86x`（`b<12`、`12<=b<32`、
+`32<=b<128`、`b>=128`）。第一段配对按机制分组:`b<28` 41 个受影响用例
+**1.3067x**，`b>=28` 57 个控制用例 **0.9987x**，证明收益来自二维复用而非主机漂移。
+
+### group 宽度证据
+
+干净独占环境下扫 `1/2/4/6/8`，所有点 verifier PASS:
+
+- `b=8`: `n=384/768/1152` 的最优宽度依次约 `4/6/8`。
+- `b=12`: 随 block 数从 32/64/96 增大，最优宽度约 `2/4/6`。
+- `b=16/24`: 宽度 2 最稳；`b=32/64` 保持 1。
+
+证据:`r19_group_width_sweep_clean.csv`、`r19_group_width_boundaries.csv`。
+曾有一轮 sweep 与另一 benchmark 进程并发，出现 `1152:8,width=2` 异常长跑；该轮整组作废、
+未归档，清空远端进程后从头重跑才形成上述结论。
+
+### 否证实验
+
+| 实验 | 结果 | 证据/结论 |
+| --- | ---: | --- |
+| 两级完成屏障 | 0.9997x | `r18_group_barrier_probe.csv`，中性，回退 |
+| tile packing + `lda=b` | 多数退化 | `r21_tile_packing_sweep.csv`，复制/回写成本更大，回退 |
+| 连续分配替代循环分配 | 0.9988x | `r23_fast_blocked_sweep.csv`，回退 |
+| 共享 atomic counter 屏障 | 明显退化 | `r24_fast_counter_sweep.csv`，cache-line 争用，回退 |
+| 按 phase 宽度缩参与者 | 1.0034x | `r25_fast_phase_width_sweep.csv`，噪声，回退 |
+
+### 新瓶颈结论
+
+二维后线程曲线（`r22_post_tile_threads.csv`）显示 `1152:8` 从 T=32 的 13.45x 到 T=40
+只有 13.55x，已经进入内存带宽平台；`b=24/32/64` 到 40 核仍上升。零开销结构上限仍是
+有效上界，但“上限 80% 可达”已被实测补上前提:它没有计入必需 C 流量和小矩阵每 panel
+固定延迟。当前 7.006x 到 60 分所需 10.667x 仍差 **1.522x**，换 barrier、packing、
+静态分配或小常量都没有这个量级。
+
+### 经验
+
+- phase buffer 不能在持久 session 中一半走 fast lane、一半走普通队列；发布域必须完整。
+- task locality 的收益必须把 C 的必需读写算进去。4x4 只把 A/B 输入从 32 tile 降到 8 tile，
+  不能把 A/B/C 总流量直接宣称为 1/4。
+- 竞争环境中的异常点整轮作废；清空进程后从头重跑，不能挑看起来合理的点保留。
+- 一项结构改动有效，不等于量级足够。二维 tiling 对受影响组 +30.7%，但只覆盖 41/150，
+  全量仍只有 53.14 分。
