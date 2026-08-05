@@ -92,15 +92,16 @@ echo "[2/6] running pass on block_cholesky"
 "${LLVM_DIS_BIN}" "${WORK_DIR}/ir/block_cholesky.opt.bc" -o "${WORK_DIR}/ir/block_cholesky.opt.ll"
 IR_LL="${WORK_DIR}/ir/block_cholesky.opt.ll"
 # The default path submits without dependency keys (phase barrier between trsm and
-# madd), while the opt-in cross-panel paths use submit_deps*. Count both and assert
-# on the total, so this check keeps working either way.
+# madd), while the opt-in cross-panel paths use submit_deps*. Range outlining may
+# remove every scalar submit, so count submit_range* as transformed work too.
 IR_SUBMIT_PLAIN=$(grep -Ec "call void @compiler2026_runtime_submit\(" "${IR_LL}" || true)
+IR_SUBMIT_RANGE=$(grep -Ec "call void @compiler2026_runtime_submit_range(_grain)?\(" "${IR_LL}" || true)
 IR_SUBMIT_DEPS=$(grep -Ec "call void @compiler2026_runtime_submit_deps3?(_priority)?\(" "${IR_LL}" || true)
-IR_SUBMITS=$((IR_SUBMIT_PLAIN + IR_SUBMIT_DEPS))
+IR_SUBMITS=$((IR_SUBMIT_PLAIN + IR_SUBMIT_RANGE + IR_SUBMIT_DEPS))
 IR_WAIT_CALLS=$(grep -Ec "call void @compiler2026_runtime_wait\(" "${IR_LL}" || true)
 IR_TRSM_CALLS=$(grep -Ec "call .*@trsm\(" "${IR_LL}" || true)
 IR_MADD_CALLS=$(grep -Ec "call .*@madd\(" "${IR_LL}" || true)
-echo "      ir_submits=${IR_SUBMITS} (plain=${IR_SUBMIT_PLAIN} deps=${IR_SUBMIT_DEPS})" \
+echo "      ir_submits=${IR_SUBMITS} (plain=${IR_SUBMIT_PLAIN} range=${IR_SUBMIT_RANGE} deps=${IR_SUBMIT_DEPS})" \
      "ir_wait_calls=${IR_WAIT_CALLS}" \
      "ir_trsm_calls=${IR_TRSM_CALLS} ir_madd_calls=${IR_MADD_CALLS}"
 if [[ "${IR_SUBMITS}" -eq 0 || "${IR_TRSM_CALLS}" -eq 0 || "${IR_MADD_CALLS}" -eq 0 ]]; then

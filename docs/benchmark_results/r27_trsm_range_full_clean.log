@@ -1,0 +1,344 @@
+chunking 5 ranges under 600 MB resident:
+  spec lines 1 98
+  spec lines 99 123
+  spec lines 124 137
+  spec lines 138 148
+  spec lines 149 150
+
+=== chunk 1/5: spec lines 1-98 ===
+[1/6] building tools
+[2/6] running pass on block_cholesky
+      ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4
+[3/6] generating input (spec lines 1-98)
+[4/6] serial reference (passes=3, in-process repeat=1)
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c1/serial_percase.csv (98 cases)
+[5/6] contestant (passes=3, in-process repeat=1)
+      runtime env: <defaults>
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c1/contestant_percase.csv (98 cases)
+cases=98 repeats=1 total_compute_seconds=0.500556330
+[6/6] verifying
+      serial: 98/98 PASS
+      contestant: 98/98 PASS
+
+label=r27_cg_trsm_range_c1
+cases=98 stat=min m_ideal=32.0
+geometric_mean_speedup=4.865674
+total_time_ratio=6.403617   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=15.21
+total_score=49.12   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+       [0, 0.95):   5 cases  geo=  0.92x
+    [0.95, 1.05):   6 cases  geo=  0.99x
+       [1.05, 2):   7 cases  geo=  1.56x
+          [2, 4):  18 cases  geo=  2.87x
+          [4, 8):  29 cases  geo=  5.89x
+         [8, 16):  28 cases  geo= 11.10x
+       [16, inf):   5 cases  geo= 18.45x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  b<12 (serial path)  :  17 cases  geo=  5.18x  share_of_log= 18.0%  score_if_lifted_to_rest=49.00
+  12<=b<32            :  26 cases  geo=  6.33x  share_of_log= 31.0%  score_if_lifted_to_rest=48.29
+  32<=b<128           :  41 cases  geo=  5.23x  share_of_log= 43.8%  score_if_lifted_to_rest=48.66
+  b>=128              :  14 cases  geo=  2.23x  share_of_log=  7.2%  score_if_lifted_to_rest=50.39
+
+--- 20 worst cases by speedup (each one costs 0.0191 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+    11   192    96   2   0.000881   0.001014   0.869x
+     0   128     8  16   0.000198   0.000214   0.925x
+    16   256   128   2   0.002116   0.002272   0.931x
+     1   128    16   8   0.000203   0.000217   0.934x
+     2   128    32   4   0.000221   0.000233   0.947x
+     3   128    64   2   0.000257   0.000267   0.963x
+     5   192     8  24   0.000578   0.000582   0.993x
+     4   128   128   1   0.000190   0.000191   0.996x
+    12   256     8  32   0.001349   0.001347   1.002x
+    17   256   256   1   0.001618   0.001612   1.004x
+    47   512   256   2   0.021119   0.020866   1.012x
+    10   192    64   3   0.000805   0.000629   1.281x
+     6   192    16  12   0.000607   0.000421   1.442x
+     8   192    32   6   0.000672   0.000428   1.568x
+    33   384   128   3   0.007121   0.004435   1.606x
+     9   192    48   4   0.000749   0.000456   1.644x
+     7   192    24   8   0.000628   0.000373   1.684x
+    80   768   256   3   0.064714   0.037738   1.715x
+    15   256    64   4   0.001849   0.000920   2.010x
+    32   384    96   4   0.006614   0.002817   2.348x
+
+score 50 needs geomean 5.33x (1.10x above current)
+score 55 needs geomean 8.00x (1.64x above current)
+score 60 needs geomean 10.67x (2.19x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range_c1.csv
+
+=== chunk 2/5: spec lines 99-123 ===
+[1/6] building tools
+[2/6] running pass on block_cholesky
+      ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4
+[3/6] generating input (spec lines 99-123)
+[4/6] serial reference (passes=3, in-process repeat=1)
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c2/serial_percase.csv (25 cases)
+[5/6] contestant (passes=3, in-process repeat=1)
+      runtime env: <defaults>
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c2/contestant_percase.csv (25 cases)
+cases=25 repeats=1 total_compute_seconds=0.449962781
+[6/6] verifying
+      serial: 25/25 PASS
+      contestant: 25/25 PASS
+
+label=r27_cg_trsm_range_c2
+cases=25 stat=min m_ideal=32.0
+geometric_mean_speedup=13.890854
+total_time_ratio=10.238573   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=43.41
+total_score=66.05   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+          [2, 4):   2 cases  geo=  3.15x
+          [4, 8):   2 cases  geo=  6.13x
+         [8, 16):   5 cases  geo= 11.05x
+       [16, inf):  16 cases  geo= 19.89x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  b<12 (serial path)  :   2 cases  geo= 24.44x  share_of_log=  9.7%  score_if_lifted_to_rest=64.80
+  12<=b<32            :   6 cases  geo= 18.53x  share_of_log= 26.6%  score_if_lifted_to_rest=63.78
+  32<=b<128           :  10 cases  geo= 18.58x  share_of_log= 44.4%  score_if_lifted_to_rest=61.45
+  b>=128              :   7 cases  geo=  6.09x  share_of_log= 19.2%  score_if_lifted_to_rest=75.88
+
+--- 20 worst cases by speedup (each one costs 0.0750 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+    13  1152   288   4   0.211036   0.080359   2.626x
+    24  1280   256   5   0.284937   0.075353   3.781x
+    12  1152   192   6   0.187993   0.038343   4.903x
+    11  1152   144   8   0.171139   0.022302   7.674x
+    23  1280   160   8   0.250036   0.030349   8.239x
+    10  1152   128   9   0.164823   0.017928   9.194x
+    22  1280   128  10   0.235397   0.021362  11.020x
+     9  1152    96  12   0.153160   0.011727  13.061x
+     0  1152    12  96   0.128092   0.008487  15.093x
+    21  1280    80  16   0.205081   0.012542  16.352x
+     1  1152    16  72   0.122813   0.007450  16.484x
+     8  1152    72  16   0.144347   0.008703  16.586x
+     2  1152    18  64   0.126678   0.007008  18.077x
+     7  1152    64  18   0.141238   0.007718  18.301x
+     3  1152    24  48   0.120088   0.006218  19.313x
+    20  1280    64  20   0.198328   0.010194  19.454x
+     4  1152    32  36   0.121538   0.006233  19.499x
+     5  1152    36  32   0.121832   0.006025  20.220x
+     6  1152    48  24   0.133367   0.006489  20.553x
+    16  1280    16  80   0.202224   0.009606  21.051x
+
+score 50 needs geomean 5.33x (0.38x above current)
+score 55 needs geomean 8.00x (0.58x above current)
+score 60 needs geomean 10.67x (0.77x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range_c2.csv
+
+=== chunk 3/5: spec lines 124-137 ===
+[1/6] building tools
+[2/6] running pass on block_cholesky
+      ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4
+[3/6] generating input (spec lines 124-137)
+[4/6] serial reference (passes=3, in-process repeat=1)
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c3/serial_percase.csv (14 cases)
+[5/6] contestant (passes=3, in-process repeat=1)
+      runtime env: <defaults>
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c3/contestant_percase.csv (14 cases)
+cases=14 repeats=1 total_compute_seconds=0.638031350
+[6/6] verifying
+      serial: 14/14 PASS
+      contestant: 14/14 PASS
+
+label=r27_cg_trsm_range_c3
+cases=14 stat=min m_ideal=32.0
+geometric_mean_speedup=17.862786
+total_time_ratio=11.241289   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=55.82
+total_score=73.49   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+          [2, 4):   1 cases  geo=  2.58x
+          [4, 8):   1 cases  geo=  5.16x
+         [8, 16):   2 cases  geo= 10.81x
+       [16, inf):  10 cases  geo= 27.13x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  b<12 (serial path)  :   2 cases  geo= 37.35x  share_of_log= 17.9%  score_if_lifted_to_rest=69.62
+  12<=b<32            :   4 cases  geo= 28.45x  share_of_log= 33.2%  score_if_lifted_to_rest=67.80
+  32<=b<128           :   4 cases  geo= 22.05x  share_of_log= 30.7%  score_if_lifted_to_rest=70.79
+  b>=128              :   4 cases  geo=  6.28x  share_of_log= 18.2%  score_if_lifted_to_rest=90.87
+
+--- 20 worst cases by speedup (each one costs 0.1339 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+    11  1536   384   4   0.703555   0.272254   2.584x
+    10  1536   256   6   0.488146   0.094614   5.159x
+     9  1536   192   8   0.451911   0.053936   8.379x
+     8  1536   128  12   0.403629   0.028942  13.946x
+     7  1536    96  16   0.364960   0.020364  17.922x
+     6  1536    64  24   0.349372   0.015511  22.524x
+     4  1536    32  48   0.320563   0.013991  22.913x
+     5  1536    48  32   0.359785   0.014069  25.572x
+     3  1536    24  64   0.344133   0.013214  26.044x
+     2  1536    16  96   0.402610   0.014924  26.978x
+     1  1536    12 128   0.469035   0.015869  29.557x
+    13  1792    14 128   0.696238   0.022074  31.541x
+     0  1536     8 192   0.666120   0.018541  35.927x
+    12  1792     8 224   0.993108   0.025573  38.834x
+
+score 50 needs geomean 5.33x (0.30x above current)
+score 55 needs geomean 8.00x (0.45x above current)
+score 60 needs geomean 10.67x (0.60x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range_c3.csv
+
+=== chunk 4/5: spec lines 138-148 ===
+[1/6] building tools
+[2/6] running pass on block_cholesky
+      ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4
+[3/6] generating input (spec lines 138-148)
+[4/6] serial reference (passes=3, in-process repeat=1)
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c4/serial_percase.csv (11 cases)
+[5/6] contestant (passes=3, in-process repeat=1)
+      runtime env: <defaults>
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c4/contestant_percase.csv (11 cases)
+cases=11 repeats=1 total_compute_seconds=0.463849101
+[6/6] verifying
+      serial: 11/11 PASS
+      contestant: 11/11 PASS
+
+label=r27_cg_trsm_range_c4
+cases=11 stat=min m_ideal=32.0
+geometric_mean_speedup=20.125385
+total_time_ratio=18.099774   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=62.89
+total_score=77.74   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+          [4, 8):   1 cases  geo=  6.67x
+         [8, 16):   1 cases  geo=  8.38x
+       [16, inf):   9 cases  geo= 25.08x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  b<12 (serial path)  :   1 cases  geo= 39.57x  share_of_log= 11.1%  score_if_lifted_to_rest=75.27
+  12<=b<32            :   3 cases  geo= 26.80x  share_of_log= 29.9%  score_if_lifted_to_rest=73.89
+  32<=b<128           :   4 cases  geo= 23.44x  share_of_log= 38.2%  score_if_lifted_to_rest=74.58
+  b>=128              :   3 cases  geo=  9.84x  share_of_log= 20.8%  score_if_lifted_to_rest=89.35
+
+--- 20 worst cases by speedup (each one costs 0.1705 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+     8  1792   256   7   0.746937   0.111978   6.670x
+     7  1792   224   8   0.723184   0.086321   8.378x
+     6  1792   128  14   0.628263   0.036831  17.058x
+     5  1792   112  16   0.571136   0.031460  18.154x
+    10  2048    16 128   1.119368   0.045980  24.345x
+     4  1792    64  28   0.534490   0.021926  24.377x
+     3  1792    56  32   0.541492   0.020793  26.043x
+     2  1792    32  56   0.487501   0.018596  26.216x
+     1  1792    28  64   0.516735   0.018829  27.444x
+     0  1792    16 112   0.606357   0.021047  28.810x
+     9  2048     8 256   1.867826   0.047200  39.573x
+
+score 50 needs geomean 5.33x (0.27x above current)
+score 55 needs geomean 8.00x (0.40x above current)
+score 60 needs geomean 10.67x (0.53x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range_c4.csv
+
+=== chunk 5/5: spec lines 149-150 ===
+[1/6] building tools
+[2/6] running pass on block_cholesky
+      ir_submits=2 (plain=0 range=2 deps=0) ir_wait_calls=2 ir_trsm_calls=3 ir_madd_calls=4
+[3/6] generating input (spec lines 149-150)
+[4/6] serial reference (passes=3, in-process repeat=1)
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c5/serial_percase.csv (2 cases)
+[5/6] contestant (passes=3, in-process repeat=1)
+      runtime env: <defaults>
+merged 3 passes -> /root/bisheng/build/percase/r27_cg_trsm_range_c5/contestant_percase.csv (2 cases)
+cases=2 repeats=1 total_compute_seconds=0.103807842
+[6/6] verifying
+      serial: 2/2 PASS
+      contestant: 2/2 PASS
+
+label=r27_cg_trsm_range_c5
+cases=2 stat=min m_ideal=32.0
+geometric_mean_speedup=17.440430
+total_time_ratio=17.054226   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=54.50
+total_score=72.70   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+         [8, 16):   1 cases  geo= 14.50x
+       [16, inf):   1 cases  geo= 20.98x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  32<=b<128           :   2 cases  geo= 17.44x  share_of_log=100.0%  score_if_lifted_to_rest=72.70
+
+--- 20 worst cases by speedup (each one costs 0.9375 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+     1  2048    64  32   0.825824   0.056955  14.500x
+     0  2048    32  64   0.777931   0.037084  20.978x
+
+score 50 needs geomean 5.33x (0.31x above current)
+score 55 needs geomean 8.00x (0.46x above current)
+score 60 needs geomean 10.67x (0.61x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range_c5.csv
+
+=== scoring the union of 5 chunks ===
+merged 150 cases from 5 chunks
+label=r27_cg_trsm_range
+cases=150 stat=min m_ideal=32.0
+geometric_mean_speedup=7.385822
+total_time_ratio=11.750535   (flops-weighted; what benchmark.sh reports -- NOT the judge metric)
+performance_score=23.08
+total_score=53.85   (functional=100.00)
+score_per_extra_1x_geomean=1.875
+
+--- per-case speedup distribution ---
+       [0, 0.95):   5 cases  geo=  0.92x
+    [0.95, 1.05):   6 cases  geo=  0.99x
+       [1.05, 2):   7 cases  geo=  1.56x
+          [2, 4):  21 cases  geo=  2.88x
+          [4, 8):  33 cases  geo=  5.91x
+         [8, 16):  37 cases  geo= 11.07x
+       [16, inf):  41 cases  geo= 22.40x
+
+--- by block size bucket (equal weight, so case COUNT is what matters) ---
+  b<12 (serial path)  :  22 cases  geo=  7.83x  share_of_log= 15.1%  score_if_lifted_to_rest=53.71
+  12<=b<32            :  39 cases  geo=  9.74x  share_of_log= 29.6%  score_if_lifted_to_rest=52.57
+  32<=b<128           :  61 cases  geo=  8.13x  share_of_log= 42.6%  score_if_lifted_to_rest=52.97
+  b>=128              :  28 cases  geo=  3.90x  share_of_log= 12.7%  score_if_lifted_to_rest=56.04
+
+--- 20 worst cases by speedup (each one costs 0.0125 points per 1% of speedup) ---
+   idx     n     b   B   serial_s  contest_s  speedup
+    11   192    96   2   0.000881   0.001014   0.869x
+     0   128     8  16   0.000198   0.000214   0.925x
+    16   256   128   2   0.002116   0.002272   0.931x
+     1   128    16   8   0.000203   0.000217   0.934x
+     2   128    32   4   0.000221   0.000233   0.947x
+     3   128    64   2   0.000257   0.000267   0.963x
+     5   192     8  24   0.000578   0.000582   0.993x
+     4   128   128   1   0.000190   0.000191   0.996x
+    12   256     8  32   0.001349   0.001347   1.002x
+    17   256   256   1   0.001618   0.001612   1.004x
+    47   512   256   2   0.021119   0.020866   1.012x
+    10   192    64   3   0.000805   0.000629   1.281x
+     6   192    16  12   0.000607   0.000421   1.442x
+     8   192    32   6   0.000672   0.000428   1.568x
+    33   384   128   3   0.007121   0.004435   1.606x
+     9   192    48   4   0.000749   0.000456   1.644x
+     7   192    24   8   0.000628   0.000373   1.684x
+    80   768   256   3   0.064714   0.037738   1.715x
+    15   256    64   4   0.001849   0.000920   2.010x
+    32   384    96   4   0.006614   0.002817   2.348x
+
+score 50 needs geomean 5.33x (0.72x above current)
+score 55 needs geomean 8.00x (1.08x above current)
+score 60 needs geomean 10.67x (1.44x above current)
+
+merged_csv=/root/bisheng/docs/benchmark_results/r27_cg_trsm_range.csv
