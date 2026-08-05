@@ -20,6 +20,16 @@
 
 结论不要只看单点 speedup，应使用几何平均和分层统计，避免对公开样例或 4 核 VM 过拟合。
 
+**计量口径（Round 9 修正，优先于本文其余部分的历史表述）**：判题用的是**等权重 per-case
+几何平均**，不是 `benchmark.sh` 报的 flops 加权总时间比。两者在同一份数据上是 3.123x 对 3.425x。
+调优必须以 `scripts/percase_bench.sh` + `scripts/score_judge.py` 的 per-case 口径为准；
+`benchmark.sh` 的总时间比只适合看大用例的相对变化。等权重下每个用例权重相同，
+因此 22 个 `b<=10` 小用例的杠杆约等于全部 150 个用例一起 +20%。
+
+另有一条测量约束：本机 `b=8` 用例带 **±10% 的代码布局噪声**（同一个不加 pass 的程序，
+只改链接 padding 字节数，geomean 就在 0.90x–1.00x 之间摆动，见
+`docs/benchmark_results/r9_layout_sensitivity.csv`）。任何 `b=8` 结论都不能来自单次构建。
+
 当前 `benchmark.sh` 已支持 `COMPILER2026_DAG_THREAD_LIST=1,2,4` 这类多线程扫参入口，并按线程分组输出 summary；terminal summary 现在同时给出 speedup P50/P95，便于先看分布再决定是否复测。成功运行后默认清理 per-suite 临时大文件，避免长时间 sweep 撑满 VM 磁盘。`tune_params.sh` 在其外层补充 `async_min_b × async_min_blocks × task_batch × dag_max_live × dag_pin_workers` 离线扫参，并汇总 aggregate CSV；新增维度默认是单值，只有显式设置列表才扩展组合空间。真实鲲鹏平台上可直接把线程列表扩展到 `1,2,4,8,16,32,48,64`，再结合 profile CSV 的 ready width、wait pressure 和 queue/exec 时间判断默认阈值、live-window 和 worker pinning 是否需要重设。
 
 ## Pass 演进方向

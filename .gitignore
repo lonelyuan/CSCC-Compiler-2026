@@ -17,3 +17,4 @@ __pycache__/
 contestant_sdk/bin/
 contestant_sdk/lib/
 
+scripts/xeon_host.env

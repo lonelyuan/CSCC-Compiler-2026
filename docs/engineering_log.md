@@ -1772,3 +1772,139 @@ shaped = min( cap(b), width );
 
 教训：用多点拟合出的公式，必须逐点回代检查——第一版虽然"拟合了 11 个点"，但 `max`/`min`
 的嵌套次序写错，实际在 `b=16, B=72` 处输出 16 而非拟合目标 8。回代一遍就能发现。
+
+## 2026-08-05 判题指标改为 per-case 计量；b=8 回退被否证为代码布局噪声（Round 9）
+
+### 最重要的一条：此前一直在优化错误的指标
+
+`submission/scripts/benchmark.sh` 报的是**每个 suite 的总时间比**，而技术方案 PDF 里判题用的是
+**等权重 per-case 几何平均**：
+
+```text
+speedup_i   = T0_i / T_i
+geo_speedup = (prod speedup_i) ** (1 / N)
+score       = 0.4 * functional + 0.6 * (100 * geo_speedup / m_ideal)
+```
+
+总时间比是 flops 加权的，被最大的用例支配；等权重几何平均里 `n=128` 和 `n=2048` 权重完全相同。
+两者在同一份数据上差别很大（150 用例，40 物理核，PASSES=3 取 per-case 最小值，150/150 PASS）：
+
+| 指标 | 值 |
+| --- | ---: |
+| 等权重 per-case geomean（**判题指标**） | **3.123x** |
+| 总时间比（`benchmark.sh` 报的） | 3.425x |
+| `m_ideal=32` 下的总分 | 45.86 |
+
+新增计量链（本地工具，不进提交包）：
+
+- `tools/percase_harness/main_percase.cpp`：逐用例计时，写 per-case CSV。除计时外与官方
+  `main.cpp` 调用方式完全一致。
+- `scripts/percase_bench.sh`：串行参考 + contestant 各跑 `PASSES` 遍整进程，取 per-case 最小值。
+  与 `benchmark.sh` 不同，任何 verifier 非 PASS 直接失败——没有正确性证据的性能数字不是结果。
+- `scripts/score_judge.py`：按判题公式算分，并按 speedup 区间和 `b` 分桶给出 log 贡献占比。
+- `scripts/merge_percase.py`：多遍取 per-case 最小值。
+
+`PASSES>1, REPEAT=1` 是忠实配置：判题一个进程跑完 150 个用例，runtime 在 resolved thread count
+变化时会重建 worker pool，这笔开销落在该用例的**首次**调用上；进程内 repeat 会复用 pool 把它藏掉。
+
+证据：`docs/benchmark_results/r9_percase_baseline.csv`。
+
+### 等权重下的杠杆分布
+
+反事实（直接改 CSV 里的 speedup 再算分），说明钱在哪：
+
+| 假设 | geomean | 总分 | Δ分 |
+| --- | ---: | ---: | ---: |
+| 现状 | 3.123x | 45.86 | — |
+| 27 个 <1.0 的用例全部抬到 1.0 | 3.217x | 46.03 | +0.18 |
+| `b<=10` 的 22 个用例抬到 2x | 3.488x | 46.54 | +0.69 |
+| `b<=10` 的 22 个用例抬到 3x | 3.702x | 46.94 | +1.09 |
+| **所有** 150 个用例各 +20% | 3.748x | 47.03 | +1.17 |
+
+两条结论：
+
+- `m_ideal=32` 下每 1x geomean 只值 **1.875 分**，分数对性能极不敏感；但排名看的是 geomean 本身，
+  所以仍然只优化 geomean。
+- **22 个 `b<=10` 用例（14.7% 的用例数）停在 ~0.95x，其杠杆约等于全部用例一起 +20%。**
+  等权重下这是最大的单块空间，对应 roadmap §3 的 range task 方向。
+
+### b<12 的 0.93x 不是调度问题，也不是 Pass 的问题
+
+先用 `COMPILER2026_ASYNC_MIN_B=999` 让 150 个用例全部走 Pass 的串行路径（一个 task 都不提交）：
+geomean **0.9916x**，其中 `b<12` 桶 **0.93x**（`docs/benchmark_results/r9_allserial.csv`）。
+所以这 22 个用例在任何调度发生之前就已经亏了 ~7%。
+
+`scripts/serial_overhead_probe.sh` 用三个二进制隔离原因，只测 22 个 `b<=10` 用例（4.8s 串行工作量）：
+
+- `pristine`：一次 clang++ 直接编译，即串行参考。
+- `roundtrip`：同样走 `-emit-llvm -c` → `opt -passes=no-op-module` → `clang++ <bc>`，**不加 pass**。
+- `pass`：真实 contestant 构建，用 `ASYNC_MIN_B=999` 强制走串行路径。
+
+| | rt/pristine | pass/roundtrip |
+| --- | ---: | ---: |
+| geomean（22 例） | 0.9959x | 0.9329x |
+| `b=8`（17 例） | — | **0.9066x** |
+| `b=9`（2 例） | — | 1.0327x |
+| `b=10`（3 例） | — | 1.0254x |
+
+`.bc` 绕路本身不要钱（0.9959x，`rt/pristine` 按构造应为 1.00，用它当噪声底）。惩罚**只出现在
+`b=8`**，`b=9`/`b=10` 完全没有——这个不连续性排除了"per-call 开销按 1/b³ 平滑增长"的解释。
+
+沿着"Pass 让串行路径代码变差"这条线做了两次结构改动，两次都**没有**移动这个数字：
+
+1. `noinline` 加在 async clone 上。第一版无效，因为属性加在 `CloneFunctionInto` **之前**——
+   该函数会把源函数的 attribute list 覆盖到目标上，加在前面的会被静默丢弃。
+   **同一个 bug 也一直在丢 `compiler2026.skip`**（`isBlockCholesky` 用它防重复变换）。
+   移到 clone 之后才生效：`async_impl` 重新变成独立符号，`block_cholesky` 从 0x979 缩回 0x3f2。
+   b=8 仍为 0.9305x。
+2. 把串行体也 outline 出去，`block_cholesky` 只剩 dispatch（`buildDispatchBody`）。
+   b=8 仍为 0.8978x。
+
+最后用 `scripts/layout_sensitivity_probe.sh` 直接量代码布局的影响：**同一个不加 pass 的程序**编译 5 次，
+唯一区别是链在 kernels 之前的 padding 字节数（0/16/32/48/80），把之后所有 text 地址推移。
+只测 17 个 `b=8` 用例，17/17 PASS：
+
+| padding | 0 | 16 | 32 | 48 | 80 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| geomean（pad0/变体） | 1.000x | 0.9564x | 0.9929x | 0.9661x | **0.9009x** |
+
+- 单用例最大 spread **1.182x**，中位 spread 1.135x，整体 geomean spread 1.110x。
+- `__official_madd_impl` 只有 275 字节，`b=8` 用例要调用它 ~n³/6b³ 次，因此它落在哪个
+  64 字节偏移上直接决定几个百分点。
+
+**结论：`b=8` 那 ~10% 完全落在本机代码布局噪声内，不是 Pass 的性质，也不该对它做优化。**
+证据：`docs/benchmark_results/r9_layout_sensitivity.csv`。
+
+推论（后续所有实验都受这条约束）：**本机任何 `b=8` 的测量都带 ±10% 的布局分量，
+单次构建的 b=8 结论不可信**，必须跨 padding 或跨构建取分布。
+
+### 保留的两处 Pass 改动
+
+两处改动都没能拿回 b=8 的数字，但仍然保留，理由是修了真 bug 且零成本：
+
+- 属性改到 `CloneFunctionInto` 之后设置，修复 `compiler2026.skip` 一直被丢弃的问题。
+- 两条路径都 outline，`block_cholesky` 变成纯 dispatch，串行路径成为签名和入口状态都与
+  pristine 相同的独立函数。代价是每次 `block_cholesky` 调用多一次 call（每用例一次）。
+
+全量验证（150 用例，40 核，PASSES=3，150/150 PASS，IR 断言
+`submit_deps=2, wait_calls=1, trsm_calls=2, madd_calls=2` 不变）：
+
+| | geomean | 总分 |
+| --- | ---: | ---: |
+| Round 8 默认 | 3.123x | 45.86 |
+| 本轮（属性修复 + 双路 outline） | **3.131x** | 45.87 |
+
++0.26%，落在噪声内，视为**中性**：接受它是为了结构和 bug 修复，不声称性能收益。
+证据：`docs/benchmark_results/r9_dispatch_outline.csv`。
+
+### 经验
+
+- **先确认在优化哪个指标。** 前 8 轮用 flops 加权总时间比调参，而判题是等权重 per-case
+  几何平均；等权重下 22 个小用例的杠杆等于全部用例一起 +20%，这个方向此前完全看不到。
+- **`CloneFunctionInto` 会覆盖目标函数的属性**，任何 `addFnAttr` 都必须放在它之后。
+  这类静默丢失不会报错，只能靠 dump IR 发现——第一次改完没看 IR，白测了一轮。
+- **在做"代码变差了"的归因之前，先量代码布局的噪声。** 本机 b=8 的布局噪声就有 ±10%，
+  和被归因给 Pass 的量同级。padding 变体是个便宜的判别实验。
+- **变体必须交错测量。** 第一版探针按变体分组跑（先全部 pristine，再全部 roundtrip），
+  按构造应为 1.00 的 `rt/pristine` 两次分别给出 1.0014x 和 1.0208x——那 2% 是机器漂移，
+  分组会让漂移伪装成变体效应。改成每一遍内交错三个变体后噪声底降到 0.4%。
