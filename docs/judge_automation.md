@@ -94,9 +94,9 @@ python3 scripts/contest_submit.py \
 
 脚本要求 Cookie 文件权限为 `0600`，不会输出 Cookie 或带 `userID` 的轮询 URL。它用提交前结果哈希排除旧结果，只有内容变化且出现终态 verdict 才结束；上传已返回 2xx 后若轮询超时，状态为“歧义”，必须人工核对而不是再次上传。
 
-## 云桌面：适合什么，不适合什么
+## 云桌面：浏览器引导与授权远程接入
 
-在线 IDE 是 noVNC WebSocket 会话，而不是稳定的 SSH 主机。入口 URL 的 `desktopParam` 与 `cicdParam` 会随会话轮换；它们不应被记录、共享或用作长期连接凭证。
+在线 IDE 的平台原生入口是 noVNC WebSocket 会话。入口 URL 的 `desktopParam` 与 `cicdParam` 会随会话轮换；它们不应被记录、共享或用作长期连接凭证。
 
 已公开的工作流能力：
 
@@ -105,9 +105,15 @@ python3 scripts/contest_submit.py \
 - 远程桌面文件上传/下载；
 - `/mnt/cgshare` 工作目录，以及网页中的工作目录文件浏览器。
 
-当前界面未公开 SSH、端口转发或 VS Code Remote-SSH 入口。因此将它作为“最后一公里”的目标环境：运行官方环境特有的构建/验收、保存日志到 `/mnt/cgshare`、再拿回本地分析；不要把日常编辑、代码审阅或大规模实验迁入 VNC。
+2026-08-05，本项目已向组委会咨询并获得使用自有组网方式建立远程接入的许可。当前页面仍未提供平台原生 SSH，但已验证可以先用 noVNC 完成一次引导，再使用以下私有链路：
 
-如果赛方将来提供明确的 SSH 或受支持的端口转发，再建立独立的 VS Code Remote-SSH/调试配置。此前不得通过猜测端口、复用 noVNC 参数或修改桌面网络配置来尝试绕过平台边界。
+```text
+userspace Tailscale -> Tailnet TCP Serve :22 -> 127.0.0.1:2222 -> 独立 sshd
+```
+
+该容器没有 `/dev/net/tun`，必须使用 `tailscaled --tun=userspace-networking`；内置 Tailscale SSH 在该模式下实测卡在 SSH banner，标准 `sshd` 加 TCP Serve 已端到端联通。完整、无个人凭证的配置和清理流程见 `docs/cloud_desktop_remote_access.md`。
+
+这条接入许可只作为本项目已确认的操作前提，不推断为平台通用规则。不得复用 noVNC 短期 token、开放 Tailscale Funnel、启用密码登录，或把 Tailnet state、SSH 私钥和 auth key 放进仓库。
 
 ### 文件上传与结果读取接口
 
@@ -219,15 +225,17 @@ build/cloud_desktop/.venv/bin/python scripts/cloud_desktop_rfb.py \
 
 ### 当前云桌面镜像的构建能力
 
-2026-08-05 对当前会话实测：测试包通过带登录 Cookie 的 curl 成功上传，远端 Python 3 可以解包，RFB 客户端可以执行命令并读回唯一标记的结果。但镜像中没有 `/etc/profile.d/bisheng.sh`、`/opt/bisheng`、clang、llvm-config、cmake 或 ninja，只有系统 GCC；仓库 SDK 的预编译 generator/verifier 又是 x86-64，不能用于该 aarch64 桌面。因此当前会话返回 `status=setup_error, exit_code=127`，不能运行 LLVM smoke test。
+2026-08-05 对当前会话实测：openEuler 22.03 LTS、aarch64、40 个在线 CPU、单线程/核、单 NUMA 节点、75 GiB 内存。测试包可以上传，远端 Python 3 可以解包，RFB 和授权 SSH 均已联通。
 
-这属于目标环境缺少构建前提，不是上传/RFB 自动化失败。`cloud_desktop_run.sh` 会检查必需工具并始终写出结构化 `result.env`，不得把该结果报告为测试通过。
+基础镜像默认没有 `/etc/profile.d/bisheng.sh`、`/opt/bisheng`、clang、llvm-config、cmake 或 ninja，只有系统 GCC；仓库 SDK 的预编译 generator/verifier 又是 x86-64。因此**未配置工具链的基础镜像**会返回 `status=setup_error, exit_code=127`。这不是永久能力限制：`/mnt/cgshare` 有充足持久空间，可以在获得许可的会话中安装 CMake/Ninja，把 AArch64 BiSheng 完整版放入 `/mnt/cgshare/toolchains`，并用 `/opt/bisheng` 指向它。
+
+`cloud_desktop_run.sh` 的工具检查仍是正确门槛：只有 CMake、Ninja 和 `/opt/bisheng/bin/{clang,clang++,llvm-config,llvm-link,opt}` 全部存在，且 verifier 通过，才能报告测试成功。远程接入成功本身不等于构建或性能验证成功。
 
 ## 推荐的 AI 协作分层
 
 1. **本地仓库为主**：AI 直接读取、修改、测试 Pass/runtime/doc，维护 Git 历史和 benchmark CSV。
-2. **现有 openEuler VM 为兼容性闸**：通过 `scripts/sync_to_vm.sh` 做 BiSheng 构建、smoke 和可复现实验；它已经是可脚本化的远程开发环境。
-3. **云桌面只做赛方环境闸**：使用 `/mnt/cgshare` 交换一个小而明确的 bundle（提交包、日志、CSV），不在其中长期维护工作树。
-4. **浏览器仅负责需要登录态的动作**：读取评测、准备上传、在人工确认后上传和轮询；浏览器不持久化认证材料。
+2. **40 核 AArch64 云桌面为唯一现役 AArch64 远程环境**：noVNC 完成首次引导后，通过经许可的私有 SSH 执行构建、全量 verifier 和可复现性能实验；源码、日志和 CSV 落在 `/mnt/cgshare`。在完成同输入、同计时口径的对照前，不把它直接等同于正式 judge。
+3. **Ubuntu x86_64 Xeon 只做多核结构实验**：仅 40 个物理核心这一维度接近评测环境，不用于 BiSheng/AArch64 兼容性或跨机绝对性能结论。
+4. **浏览器只负责需要登录态的动作**：启动/恢复云桌面、文件上传、读取正式评测和必要的认证确认；日常终端操作优先使用 SSH，浏览器不持久化认证材料。
 
-这样把 AI 最擅长的代码/实验闭环放在可复现的本地与 VM，把难以自动化的 GUI 会话压缩为少量、可审计的人工节点。
+这样把云桌面代码/实验闭环放在可复现的授权 SSH 中，把 GUI 会话压缩为首次引导和恢复节点。

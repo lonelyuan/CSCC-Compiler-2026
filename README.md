@@ -18,6 +18,7 @@
 │   ├── performance.md
 │   ├── roadmap.md
 │   ├── engineering_log.md
+│   ├── cloud_desktop_remote_access.md
 │   ├── judge_automation.md
 │   └── benchmark_results/
 ├── submission/
@@ -61,6 +62,7 @@
 - `docs/performance.md`：性能实验结果和 CSV 路径。
 - `docs/roadmap.md`：面向真实鲲鹏多核平台和决赛扩展数据的长期优化路线。
 - `docs/engineering_log.md`：记录每轮优化的验证结果、经验教训和后续约束。
+- `docs/cloud_desktop_remote_access.md`：经组委会许可并实测可用的 AArch64 云桌面私有 SSH 引导、恢复、诊断和撤销流程。
 - `docs/judge_automation.md`：提交前自动化、云桌面文件传输和浏览器 agent 操作边界。
 - `docs/benchmark_results/`：历史和当前 benchmark 结果。
 - 赛题 PDF 可作为本地参考文件放在 `docs/` 下；PDF 文件默认被 `.gitignore` 忽略，不作为工程源码提交。
@@ -69,6 +71,8 @@
 - `scripts/prepare_cloud_desktop_bundle.sh`：生成可由云桌面自动化测试的源码 bundle、校验值和远程执行命令。
 - `scripts/upload_cloud_desktop_bundle.sh`：使用新鲜云桌面链接的短期能力参数上传测试 bundle，不用于正式竞赛提交。
 - `scripts/cloud_desktop_rfb.py`：可选的 noVNC WebSocket/RFB 协议客户端，用于探测连接、发送终端命令和读取剪贴板结果。
+- `scripts/cloud_desktop_ssh.sh`：通过私有 Tailnet MagicDNS 名称检查或连接已引导的 AArch64 云桌面，不固化个人 IP。
+- `scripts/sync_to_cloud_desktop.sh`：把源码安全同步到 `/mnt/cgshare/bisheng`；自动选择 rsync 或 tar-over-SSH，默认不删除远端文件，也不同步构建、性能产物或认证状态。
 - `scripts/contest_submit.py`：动态发现 CourseGrading 正式提交接口，校验 zip、执行一次已授权上传并轮询新评测结果。
 - `requirements-cloud-desktop.txt`：RFB 协议客户端的隔离 Python 依赖；日常构建不需要安装。
 - `skills/compiler-contest-assistant/`：本项目配套 Codex skill，记录开发环境、比赛约束、评测流程和长期优化路线，便于协作者复用。
@@ -100,6 +104,20 @@ $compiler-contest-assistant 继续优化本项目
 ```
 
 三个 skill 分别负责工程开发、云桌面测试和正式竞赛提交。正式提交始终需要当前会话中的明确授权，一次授权只允许一次上传。
+
+云桌面首次仍由已登录 noVNC 页面引导；完成
+`docs/cloud_desktop_remote_access.md` 的私有组网配置后，可使用：
+
+```bash
+./scripts/cloud_desktop_ssh.sh --check
+./scripts/sync_to_cloud_desktop.sh
+./scripts/cloud_desktop_ssh.sh
+```
+
+Tailnet state、登录 URL、auth key、私钥和个人公钥不得写入仓库。云桌面连接成功只证明远程
+通道可用，构建和性能结论仍必须有 verifier 与 CSV 证据。`43.142.45.204:6000` 是 Ubuntu
+x86_64 Xeon 多核调度实验机，只有核心数规模接近；40 核 openEuler AArch64 云桌面是本次
+远程测评入口，仍须用正式 judge 的同口径逐 case 结果校准。
 
 ## 常用命令
 

@@ -1772,3 +1772,26 @@ shaped = min( cap(b), width );
 
 教训：用多点拟合出的公式，必须逐点回代检查——第一版虽然"拟合了 11 个点"，但 `max`/`min`
 的嵌套次序写错，实际在 `b=16, B=72` 处输出 16 而非拟合目标 8。回代一遍就能发现。
+
+## 2026-08-05 40 核 AArch64 云桌面私有 SSH 接入
+
+经组委会确认允许使用自有组网方式建立远程接入后，对 CourseGrading 云桌面完成环境探测：
+
+- openEuler 22.03 LTS、aarch64、40 个在线 CPU、单线程/核、单 NUMA 节点、75 GiB 内存；
+- 容器无 `/dev/net/tun`，但出站 HTTPS 正常且已有 `/usr/sbin/sshd`；
+- Tailscale userspace networking 可以登录 Tailnet，当前链路可能经 DERP 中继；
+- 内置 Tailscale SSH 能建立 TCP 连接，但服务端不返回 SSH banner；
+- `userspace tailscaled -> Tailnet TCP Serve :22 -> 127.0.0.1:2222 -> 独立 sshd`
+  已用标准 OpenSSH 端到端验证联通。
+
+接入状态、host key、authorized keys 和日志全部保存在 `/mnt/cgshare/tailscale-cloud`，不进入
+仓库；`sshd` 仅监听 loopback，关闭密码/PAM/交互式认证，Tailnet 侧只使用私有 Serve，不启用
+Funnel。仓库新增无个人 IP/密钥内容的 `scripts/cloud_desktop_ssh.sh` 和
+`scripts/sync_to_cloud_desktop.sh`，为后续远程构建、全量 verifier 和性能评测自动化提供固定入口。
+
+该结果只证明远程通道成立。基础镜像仍默认缺少 CMake、Ninja 和 BiSheng；在同源、同输入、
+同计时口径的 AArch64 测试与正式 judge 结果对齐之前，不把该环境当作正式性能证据。
+
+环境边界同步更新：原 4-vCPU AArch64 VM 已退役；`43.142.45.204:6000` 继续只用于 Ubuntu
+x86_64 多核调度实验。后续 AArch64 构建、verifier 和目标相关性实验统一进入 40 核云桌面。
+本次只更新远程接入/测评环境，不改性能实现、调参默认值或历史性能文档。

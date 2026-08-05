@@ -17,6 +17,7 @@ __pycache__/
 contestant_sdk/bin/
 contestant_sdk/lib/
 .cloud-desktop-cookies.txt
+/tailscale-cloud/
 /tools/sched_harness/sched_bench
 /tools/sched_harness/sched_bench_tsan
 /tools/sched_harness/*.dSYM/

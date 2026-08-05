@@ -4,8 +4,8 @@ description: >-
   Project assistant for the Bisheng/LLVM compiler contest workspace at
   /Users/chenzhongyuan/Documents/bisheng. Use when Codex works on this dynamic
   operator graph compilation and parallel scheduling project: configuring the
-  openEuler/BiSheng compatibility VM or 40-core Ubuntu Xeon performance host,
-  syncing remote workspaces, building LLVM Pass/runtime artifacts,
+  authorized 40-core openEuler AArch64 cloud desktop or the 40-core Ubuntu
+  Xeon scheduler host, syncing remote workspaces, building LLVM Pass/runtime artifacts,
   packaging/submitting zip deliverables, interpreting judge results, maintaining
   docs, benchmarking, or implementing compiler-level optimizations under contest
   rules without SDK hacks or fake speedups.
@@ -18,25 +18,37 @@ Use this skill as the standing project guide for `/Users/chenzhongyuan/Documents
 ## Workspace And Remote Hosts
 
 - Local workspace: `/Users/chenzhongyuan/Documents/bisheng`.
+- Treat the former 4-vCPU AArch64 VM as retired. Do not use it as a
+  compatibility gate or put its private address/key path into new instructions.
+  Leave its historical scripts and benchmark evidence untouched for pending
+  branch integration, but do not select them for new runs.
 
-### openEuler/BiSheng compatibility VM
+### 40-core CourseGrading AArch64 cloud desktop
 
-- VM project path: `/root/bisheng`.
-- VM login: `ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131`.
-- VM environment: openEuler aarch64, BiSheng under `/opt/bisheng`, LLVM 15.0.4.
-- Always load toolchain in VM commands:
-
-```bash
-source /etc/profile.d/bisheng.sh
-```
-
-- Sync local project to VM with:
-
-```bash
-./scripts/sync_to_vm.sh
-```
-
-- Do not hard-code or persist plaintext passwords in files. Use the existing SSH key path above; if authentication fails, ask the user.
+- The project has confirmed with the competition committee that it may establish
+  its own private remote-access path. Do not generalize this permission to other
+  teams or contests.
+- The platform-native entry is the authenticated noVNC page. After bootstrap,
+  connect by MagicDNS hostname with `scripts/cloud_desktop_ssh.sh` or
+  `ssh root@bisheng-cg-aarch64`.
+- Environment observed on 2026-08-05: openEuler 22.03 LTS, aarch64, 40 online
+  CPUs, one thread per core, one NUMA node, and 75 GiB RAM.
+- There is no `/dev/net/tun`. The verified topology is userspace `tailscaled`,
+  private Tailnet TCP Serve port 22, and a public-key-only `sshd` listening on
+  `127.0.0.1:2222`. Built-in Tailscale SSH did not return a server banner.
+- Keep all Tailscale state, host keys, and logs outside the repository under
+  `/mnt/cgshare/tailscale-cloud`. Never persist login URLs, auth keys, Tailnet
+  addresses, node state, personal public keys, or private keys in Git.
+- The base image does not include CMake, Ninja, or BiSheng. Provision the full
+  AArch64 toolchain on persistent storage and expose it at `/opt/bisheng` before
+  using the repository scripts.
+- Full bootstrap, recovery, diagnosis, and teardown instructions live in
+  `docs/cloud_desktop_remote_access.md`.
+- This is the best available AArch64 performance-correlation candidate, but it
+  is not formal judge evidence until a same-source, same-input, same-timing
+  comparison has been completed. Calibrate against the observed formal judge
+  result: 150/150 audit and perf passes, equal-weight per-case geomean
+  `2.393844`, `m_ideal=32.0`.
 
 ### 40-core Ubuntu Xeon performance host
 
@@ -51,7 +63,7 @@ source ~/llvm17.env
 
 - `~/llvm17.env` selects `/usr/lib/llvm-17`, sets generator/verifier concurrency to 40, and preserves benchmark artifacts.
 - Use `taskset -c 0-39` for the established 40-physical-core experiment convention. Record any different CPU affinity in the benchmark evidence.
-- Use this host for x86_64 scheduler scaling and same-host speedup comparisons. Do not treat it as BiSheng/aarch64 compatibility proof or as the formal judge performance environment.
+- Use this host only for x86_64 scheduler scaling and same-host speedup comparisons. Its 40 physical cores approximate the judge's core-count scale, but its Ubuntu/x86_64/LLVM 17 stack does not provide BiSheng, AArch64, openEuler, or formal performance equivalence.
 - Coordinate before replacing `~/bisheng`: another worktree or agent may have an active experiment there. `~/tb.sh` is a Round 7 task-batch sweep, not host bootstrap; do not overwrite or run it unless the current task calls for that experiment.
 - Do not persist private keys, passwords, or authentication material in the repository. If key authentication fails, ask the user.
 
@@ -60,7 +72,7 @@ source ~/llvm17.env
 - `submission/pass/dag_pass.cpp`: LLVM New PM pass. It clones an async version of `block_cholesky`, identifies official `trsm/madd` calls in IR, outlines task functions, recovers first-pass block keys from GEP offsets, and inserts runtime submit/wait or dependency-aware submit calls.
 - `submission/runtime/dag_runtime.cpp`: generic task runtime with worker pool, ready queue, panel-local DAG dependencies, arena task-context allocation, optional profiling, and main-thread participation during wait.
 - `submission/scripts/build.sh`: build pass/runtime.
-- `submission/scripts/smoke_test.sh`: local VM correctness smoke test.
+- `submission/scripts/smoke_test.sh`: correctness verifier for a selected case range.
 - `submission/scripts/benchmark.sh`: benchmark selected public case ranges and write CSV.
 - `submission/scripts/package.sh`: build and create `dist/submission.zip` and `.tar.gz`; zip root must contain `CMakeLists.txt`.
 - `docs/`: project docs, benchmark CSVs, design notes, principle explanation, and roadmap.
@@ -114,50 +126,13 @@ Prioritize compiler credibility:
 - Keep changes scoped and reversible; use git commits for meaningful milestones.
 - Preserve judge-compatible package layout: archive root must contain `CMakeLists.txt`.
 - Prefer IR analysis and dependency recovery over source rewriting.
-- Treat the 4-vCPU openEuler VM as the BiSheng compatibility gate and the 40-core Xeon host as a scalability/performance debugging platform; neither substitutes for formal judge results.
+- Use the authorized 40-core AArch64 cloud desktop as the only active AArch64
+  build/verifier/correlation environment. Use the Xeon host only for x86_64
+  scheduler scaling. Treat old 4-vCPU VM numbers as historical evidence only.
 - Design for real Kunpeng 920 multi-core scaling: likely 48/64-core class servers and possible larger final cases.
 - When an optimization regresses or is not clearly valid, revert or document it as an experiment.
 
 ## Standard Commands
-
-### openEuler/BiSheng compatibility VM
-
-Build submission on VM:
-
-```bash
-ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 \
-  'source /etc/profile.d/bisheng.sh && cd /root/bisheng && ./submission/scripts/build.sh'
-```
-
-Smoke test selected case range:
-
-```bash
-ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 \
-  'source /etc/profile.d/bisheng.sh && cd /root/bisheng && SPEC_START=91 SPEC_END=96 COMPILER2026_DAG_THREADS=4 ./submission/scripts/smoke_test.sh'
-```
-
-Benchmark:
-
-```bash
-ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 \
-  'source /etc/profile.d/bisheng.sh && cd /root/bisheng && LABEL=<label> REPEAT=3 COMPILER2026_DAG_THREADS=4 ./submission/scripts/benchmark.sh'
-```
-
-Package:
-
-```bash
-ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 \
-  'source /etc/profile.d/bisheng.sh && cd /root/bisheng && ./submission/scripts/package.sh'
-scp -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no \
-  root@192.168.8.131:/root/bisheng/dist/submission.zip dist/submission.zip
-```
-
-Inspect optimized IR for compliance:
-
-```bash
-ssh -i ~/.ssh/bisheng_vm_ed25519 -o StrictHostKeyChecking=no root@192.168.8.131 \
-  'source /etc/profile.d/bisheng.sh && cd /root/bisheng && llvm-dis build/optimization_benchmarks/ir/app.opt.bc -o - 2>/dev/null | grep -n "compiler2026_async_impl\|compiler2026_task_\|compiler2026_runtime_submit\|call.*@trsm\|call.*@madd\|define.*block_cholesky" | sed -n "1,160p"'
-```
 
 ### 40-core Ubuntu Xeon performance host
 
@@ -177,22 +152,57 @@ ssh -i ~/.ssh/ouc_xeon_ed25519 -p 6000 -o StrictHostKeyChecking=accept-new ouc@4
 
 Archive the resulting CSV under `docs/benchmark_results/` and record the exact remote commit/source state. Compare only against baselines measured on this same host and affinity configuration.
 
+### 40-core CourseGrading AArch64 cloud desktop
+
+After the noVNC bootstrap and toolchain provisioning documented in
+`docs/cloud_desktop_remote_access.md`:
+
+```bash
+./scripts/cloud_desktop_ssh.sh --check
+./scripts/sync_to_cloud_desktop.sh
+./scripts/cloud_desktop_ssh.sh \
+  'cd /mnt/cgshare/bisheng && ./submission/scripts/build.sh'
+```
+
+Run verifier and benchmark commands on `/mnt/cgshare`, recording the exact
+source revision, command, CPU affinity, toolchain version, and output CSV. Do
+not transfer files concurrently with timed runs, and do not compare absolute
+times across AArch64 and Xeon hosts.
+
+Use the following order for a cloud calibration run:
+
+1. Record local `git rev-parse HEAD` and `git status --short`; do not describe a
+   dirty source tree using only its commit ID.
+2. Run `cloud_desktop_ssh.sh --check`, then sync source once. Stop all sync and
+   downloads before timing.
+3. Capture `uname -a`, `lscpu`, `nproc`, memory, governor/affinity where
+   available, BiSheng/LLVM/CMake/Ninja versions, and a hash of the case spec.
+4. Build, run `SPEC_START=1 SPEC_END=150` with the verifier, then run the
+   detailed benchmark with `REPEAT>=3` and an explicit thread list.
+5. Copy CSV/log/metadata artifacts back under `docs/benchmark_results/` using a
+   label that identifies the host, source state, and date.
+6. Compare with the formal `2.393844x` only after confirming that the runner
+   computes an equal-weight geometric mean over the same individual cases.
+   The current four-suite `benchmark.sh` summary and full-range
+   `smoke_test.sh` aggregate are useful diagnostics but are not by themselves
+   judge-equivalent per-case evidence.
+
 ## Submission/Judge Workflow
 
 When preparing a submission:
 
-1. Sync to VM.
+1. Check and sync to the AArch64 cloud desktop.
 2. Build.
 3. Run smoke test with verifier.
 4. Run a benchmark label and archive CSV under `docs/benchmark_results/` when the result matters.
 5. Package.
-6. Verify zip layout locally or on VM:
+6. Verify zip layout in a clean directory on the cloud desktop:
 
 ```bash
 rm -rf /tmp/judge_zip_test
 mkdir -p /tmp/judge_zip_test/submission /tmp/judge_zip_test/build
 cd /tmp/judge_zip_test/submission
-unzip -q /root/bisheng/dist/submission.zip
+unzip -q /mnt/cgshare/bisheng/dist/submission.zip
 cmake -S /tmp/judge_zip_test/submission -B /tmp/judge_zip_test/build -G Ninja \
   -DLLVM_CONFIG=/opt/bisheng/bin/llvm-config \
   -DCMAKE_C_COMPILER=/opt/bisheng/bin/clang \
